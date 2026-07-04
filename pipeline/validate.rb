@@ -115,6 +115,11 @@ module OpenASNPipeline
                                "either upstream broke or the world changed; investigate before publishing",
                                layer, delta * 100, prev, now, DELTA_TOLERANCE * 100))
       end
+      # Log the PASS too: a silent gate is indistinguishable from a skipped
+      # one, which makes "did the delta gate actually run?" unanswerable
+      # from a green CI log (cost us a log-archaeology session 2026-07-04).
+      summary = previous_stats["layer_counts"].map { |layer, prev| "#{layer} #{prev}→#{current.fetch(layer, 0)}" }.join(", ")
+      Env.log("G4: deltas within ±#{(DELTA_TOLERANCE * 100).to_i}% of previous build (#{summary})")
     end
 
     def layer_counts(artifacts)

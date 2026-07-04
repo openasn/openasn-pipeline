@@ -70,7 +70,14 @@ module OpenASNPipeline
         elsif drift > HOSTING_DRIFT_WARN
           Env.warn(format("hosting ASN count moved %.1f%% day-over-day (%d -> %d) - keep an eye on ipverse",
                           drift * 100, prev, hosting.size))
+        else
+          # Log engagement: silence must never be ambiguous between
+          # "compared and fine" and "had nothing to compare against".
+          Env.log(format("crosscheck: day-over-day drift OK (hosting %d -> %d, %.2f%%)",
+                         prev, hosting.size, drift * 100))
         end
+      else
+        Env.log("crosscheck: no previous stats - drift comparison skipped (expected on first build)")
       end
 
       # Uncovered reference ASNs are exactly the candidates for
