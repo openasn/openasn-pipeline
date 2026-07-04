@@ -13,12 +13,12 @@
 #   asn-categories.csv                  - convenience CSV (CC0): the full
 #                                         ASN -> category/role/flags table
 #
-# Upload model (PRD D3): a rolling `latest` release updated nightly is the
+# Upload model (founding decision; see data-repo README "What you get"): a rolling `latest` release updated nightly is the
 # free-CDN distribution channel (precedent: sapics/ip-location-db,
 # tn3w/IPBlocklist). A dated tag is cut weekly for pinning. Uploads happen
 # via `gh` only when PUBLISH=1 - local builds never touch the network here.
 #
-# RubyGems noise rule (PRD gotcha 19): data moves through THESE releases;
+# RubyGems noise rule: data moves through THESE releases;
 # the gem never re-releases for data. Do not "helpfully" wire gem version
 # bumps into this stage.
 
@@ -108,7 +108,7 @@ module OpenASNPipeline
 
       manifest = {
         format_version: FORMAT_VERSION,
-        # Open-core contract (PRD §16): the free edition is and stays "core".
+        # Open-core contract (data-repo DECISIONS.md D-IMPL-5): the free edition is and stays "core".
         # Future signed Pro artifacts will use this same manifest shape plus
         # a real `signature` - keep the key present-but-null so clients can
         # feature-detect without a schema change.

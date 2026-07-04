@@ -8,7 +8,7 @@
 #   G2. Record re-find: for a sample of base records, binary search over the
 #       packed artifact returns exactly that record (search-correctness
 #       against the same bytes users will download).
-#   G3. Size sanity: ipv4 within 2-20MB (PRD acceptance), ipv6 within
+#   G3. Size sanity: ipv4 within 2-20MB (founding acceptance bound), ipv6 within
 #       1-40MB.
 #   G4. Layer-count deltas vs the previous published build within ±20%
 #       (skipped with a log line on the first build ever).

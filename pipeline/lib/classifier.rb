@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Reference classifier over compiled artifacts - the PRD §9 precedence
+# Reference classifier over compiled artifacts - the canonical precedence
 # ladder, restricted to what the canonical artifact contains (Tier A).
 # Tier B overlays (Apple relay, Tor, cloud provider ranges, ...) are fetched
 # and applied CLIENT-side by the gem; rules 3, 4 and 8 therefore cannot fire
@@ -21,7 +21,7 @@ module OpenASNPipeline
   module Classifier
     Verdict = Struct.new(:verdict, :rule, :asn, :category, :network_role, :flags, keyword_init: true)
 
-    # IPv4 special ranges, checked before any data layer (PRD §9 step 2).
+    # IPv4 special ranges, checked before any data layer (precedence step 2).
     # [start, end, verdict, rule]
     V4_SPECIALS = [
       ["0.0.0.0/8",      :private, :special_reserved],
@@ -41,12 +41,12 @@ module OpenASNPipeline
       ["fe80::/10", :private, :special_link_local]
     ].map { |cidr, verdict, rule| r = IPAddr.new(cidr).to_range; [r.first.to_i, r.last.to_i, verdict, rule] }.freeze
 
-    # RESOLVED DEVIATION from PRD §9 rules 12/16 (documented in
-    # DECISIONS.md D-IMPL-1 and the README): the PRD carved ALL transit roles
+    # RESOLVED DEVIATION from the founding spec (documented in
+    # data-repo DECISIONS.md D-IMPL-1 and README): the founding spec carved ALL transit roles
     # out of :residential_isp, but live data (2026-07-04) shows ipverse
     # assigns major/midsize_transit to virtually every national consumer
     # telco (Comcast, Telefónica, Vodafone DE, Orange, BT, TIM, ... —
-    # 40.2% of routed IPv4 would have become :unknown, and the PRD's own
+    # 40.2% of routed IPv4 would have become :unknown, and the spec's own
     # §13 acceptance panel would fail). Only tier1_transit is treated as
     # pure-backbone ambiguity (19 ASNs worldwide; the four consumer giants
     # among them are confirmed via data/overrides/eyeball_confirm.txt).

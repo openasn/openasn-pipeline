@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Stage 3: paranoia gates over ipverse as-metadata's categorization (PRD D8).
+# Stage 3: paranoia gates over ipverse as-metadata's categorization.
 #
 # WHY THIS EXISTS: the entire base-layer classification leans on ipverse's
 # `category` field, which (a) has only existed since 2026-02-08, (b) comes
@@ -53,7 +53,7 @@ module OpenASNPipeline
 
       if hosting.size < MIN_HOSTING_ASNS
         Env.fail_stage!("as-metadata hosting count #{hosting.size} < floor #{MIN_HOSTING_ASNS} - " \
-                        "category field likely broken upstream (PRD D8 tripwire)")
+                        "category field likely broken upstream (see this file header: the D8 tripwire)")
       end
       if coverage < MIN_REFERENCE_COVERAGE
         Env.fail_stage!(format("as-metadata covers only %.1f%% of the X4B∪bad-asn reference dc set " \

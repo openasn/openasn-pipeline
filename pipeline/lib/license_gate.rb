@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# The license gate (PRD R4): every build re-downloads each upstream
+# The license gate (data-repo README "Legal design" rule 4): every build re-downloads each upstream
 # license-declaring file, extracts the license-bearing text, and compares its
 # SHA-256 against the pinned hash in data/licenses/pins.json.
 #

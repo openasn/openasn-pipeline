@@ -3,7 +3,7 @@
 # Conditional-GET HTTP client with an on-disk cache and keep-last-good
 # semantics. Every upstream fetch in the pipeline goes through this.
 #
-# Behavior contract (matches PRD "keep last-good on failure"):
+# Behavior contract ("keep last-good on failure"):
 #   * 200        -> body written atomically to cache, ETag/Last-Modified saved
 #   * 304        -> cached copy reused ("not modified")
 #   * error/5xx  -> if a cached copy exists: WARN and reuse it (stale-ok)

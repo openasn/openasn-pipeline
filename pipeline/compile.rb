@@ -13,7 +13,7 @@
 # Precedence inside this stage (data precedence, not lookup precedence):
 #   corrections.yml > eyeball_confirm.txt > ipverse as-metadata
 # Lookup-time precedence between flags and overlays is the client's job
-# (PRD §9); we just record every independent bit faithfully (PRD D10: the
+# (see the classifier + data-repo README); we record every independent bit faithfully (measured: the
 # X4B VPN and DC overlays overlap only ~70% - they are independent signals,
 # never a hierarchy).
 

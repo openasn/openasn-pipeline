@@ -4,13 +4,13 @@
 # with its license identity. This file is the single place where upstream
 # URLs live. If an upstream moves, fix it here and nowhere else.
 #
-# LEGAL INVARIANT (PRD R1, do not weaken): only sources whose EXACT
+# LEGAL INVARIANT (data-repo README "Legal design" rule 1, do not weaken): only sources whose EXACT
 # redistributed artifact carries explicit redistribution rights may appear
 # here - PDDL, CC0, or MIT-where-the-license-explicitly-covers-output.
 # A builder repo's license does not sanitize the data it aggregates.
 # Anything else belongs in fetch-manifest.json (fetched by end users from
 # the original authority, never republished by us) or nowhere at all.
-# The full catalog with rationale for every exclusion: see README + PRD §5.
+# The full catalog with rationale for every exclusion: see the data-repo README.
 
 require_relative "env"
 require_relative "http"
@@ -53,7 +53,7 @@ module OpenASNPipeline
     # --- X4BNet/lists_vpn: VPN + datacenter range overlays --------------------
     # MIT, and the README explicitly extends the license to "the list itself
     # (source files and generated output)" - the wording that makes X4B
-    # redistributable when most aggregated lists are not (PRD Appendix C).
+    # redistributable when most aggregated lists are not (quote pinned in data/licenses/).
     #
     # GOTCHA: the legacy root ipv4.txt path was REMOVED in 2026 (it broke
     # MISP's generator which still hardcodes it). Only output/... paths are
@@ -72,7 +72,7 @@ module OpenASNPipeline
     # abuse. CSV has a header row (ASN,Entity) - parser must skip it.
     BAD_ASN_URL = "https://raw.githubusercontent.com/brianhama/bad-asn-list/master/bad-asn-list.csv"
 
-    # --- License pinning (PRD R4) ---------------------------------------------
+    # --- License pinning ---------------------------------------------------------
     # We pin the SHA-256 of every upstream license-declaring file and FAIL THE
     # BUILD if any changes. Licenses have changed under projects before
     # (MaxMind Dec 2019). Expected hashes live in data/licenses/pins.json;
