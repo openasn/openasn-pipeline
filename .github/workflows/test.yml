@@ -1,0 +1,24 @@
+name: Tests
+
+# Unit tests only — pure logic, no network, no data-repo checkout needed
+# (that's by design: lib paths resolve lazily). The nightly DATA build
+# lives in openasn/openasn's nightly-build.yml, which checks this repo out.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Run unit tests
+        run: bundle exec rake test

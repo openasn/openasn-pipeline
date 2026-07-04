@@ -1,0 +1,9 @@
+# Build workspace: downloaded upstream data (cache/), intermediates (work/),
+# compiled artifacts (dist/). Artifacts are published to the data repo's
+# GitHub Releases, never committed.
+/build/
+.DS_Store
+/.bundle/
+/vendor/bundle/
+/coverage/
+*.gem
