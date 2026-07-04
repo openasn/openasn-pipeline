@@ -151,7 +151,11 @@ module OpenASNPipeline
       http.read_timeout = READ_TIMEOUT
 
       response = http.request(Net::HTTP::Get.new(uri, headers))
-      if response.is_a?(Net::HTTPRedirection)
+      # Net::HTTPNotModified is a 3xx class in Ruby's hierarchy, but it is
+      # not a redirect and legitimately has no Location header. Let callers
+      # handle 304 as cache-fresh instead of misreporting it as a broken
+      # redirect.
+      if response.is_a?(Net::HTTPRedirection) && !response.is_a?(Net::HTTPNotModified)
         # Cross-host redirect is the NORM for GitHub release assets
         # (-> objects.githubusercontent.com); drop conditional headers on the
         # hop, the redirect target is a one-off signed URL.
