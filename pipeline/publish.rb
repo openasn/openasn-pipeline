@@ -218,23 +218,39 @@ module OpenASNPipeline
     # Data-repo record of this decision: DECISIONS.md D-REL-1.
     # ------------------------------------------------------------------
 
-    ROLLING_TITLE = "OpenASN data (rolling latest)"
+    # Release titles are DATE-FIRST and re-stamped on every publish, because
+    # the title is the only freshness signal the repo-home sidebar gives us:
+    # the sidebar's relative time ("17 hours ago") is the release object's
+    # CREATION time, which never advances for a rolling release whose assets
+    # are merely re-uploaded - by design it looks ever-staler. The sidebar
+    # also truncates titles at roughly 25-30 chars (observed 2026-07-05:
+    # "OpenASN data (rolling lat..."), so the date must LEAD the title or it
+    # is the part that gets cut. Both titles share the "<date> · OpenASN
+    # data" prefix; the suffix disambiguates rolling vs pinned in the
+    # releases list (on Sundays both carry the same date).
+    def rolling_title(manifest)
+      "#{manifest.fetch(:build_id)[0, 10]} · OpenASN data — nightly rolling"
+    end
+
+    def dated_title(tag)
+      "#{tag} · OpenASN data — pinned snapshot"
+    end
 
     # The gh invocations are built by pure functions (unit-testable without
     # a gh binary or network; see test/publish_test.rb) and executed by gh!.
 
     def rolling_create_args(manifest)
       ["release", "create", RELEASE_TAG, "--repo", PUBLISH_REPO,
-       "--title", ROLLING_TITLE,
+       "--title", rolling_title(manifest),
        "--notes", rolling_release_notes(manifest),
        "--latest"]
     end
 
-    # `gh release edit` re-stamps the body with the current build and
-    # re-asserts the badge (invariant 2 above) after every asset upload.
+    # `gh release edit` re-stamps the title + body with the current build
+    # and re-asserts the badge (invariant 2 above) after every asset upload.
     def rolling_edit_args(manifest)
       ["release", "edit", RELEASE_TAG, "--repo", PUBLISH_REPO,
-       "--title", ROLLING_TITLE,
+       "--title", rolling_title(manifest),
        "--notes", rolling_release_notes(manifest),
        "--latest"]
     end
@@ -244,7 +260,7 @@ module OpenASNPipeline
     # parsed as a stray positional arg).
     def dated_create_args(tag, manifest, files)
       ["release", "create", tag, "--repo", PUBLISH_REPO,
-       "--title", "OpenASN data #{tag}",
+       "--title", dated_title(tag),
        "--notes", dated_release_notes(tag, manifest),
        "--latest=false",
        *files]

@@ -38,6 +38,22 @@ module OpenASNPipeline
       assert_equal %w[release edit latest], edit.first(3)
     end
 
+    def test_titles_lead_with_the_build_date
+      # The repo-home sidebar truncates titles (~25-30 chars) and its
+      # relative time is release CREATION time (never advances for a rolling
+      # release), so a leading ISO date in the title is the only freshness
+      # signal that reliably survives. Suffixes must differ so rolling vs
+      # pinned stay distinguishable on Sundays when both carry one date.
+      rolling = Publish.rolling_title(MANIFEST)
+      dated   = Publish.dated_title("2026-07-12")
+      assert rolling.start_with?("2026-07-05 "), rolling
+      assert dated.start_with?("2026-07-12 "), dated
+      refute_equal Publish.dated_title("2026-07-05"), rolling
+      # Titles ride inside the same argv the badge flags do - pin placement.
+      assert_includes Publish.rolling_edit_args(MANIFEST), rolling
+      assert_includes Publish.dated_create_args("2026-07-12", MANIFEST, []), dated
+    end
+
     def test_notes_are_stamped_with_build_identity
       [Publish.rolling_release_notes(MANIFEST),
        Publish.dated_release_notes("2026-07-12", MANIFEST)].each do |notes|
