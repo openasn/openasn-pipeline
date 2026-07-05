@@ -53,8 +53,15 @@ module OpenASNPipeline
       exit 1
     end
 
+    # Where crosscheck fetches the PREVIOUS build's manifest for the
+    # day-over-day delta gates. Tag-addressed on purpose - the badge-form
+    # `releases/latest/download/...` resolves via GitHub's "Latest" badge,
+    # which a weekly dated snapshot stole once (2026-07-05); the delta gates
+    # would then quietly diff against a week-old manifest and a real ±20%
+    # overnight swing could slip through. Full write-up: pipeline/publish.rb
+    # ("Latest badge semantics") and data-repo DECISIONS.md D-REL-1.
     def release_base_url
-      ENV.fetch("OPENASN_RELEASE_URL", "https://github.com/openasn/openasn/releases/latest/download/")
+      ENV.fetch("OPENASN_RELEASE_URL", "https://github.com/openasn/openasn/releases/download/latest/")
     end
   end
 end

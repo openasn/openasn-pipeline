@@ -46,7 +46,7 @@ module OpenASNPipeline
       write_sha256sums
 
       Env.log("publish: dist/ assembled (build #{build_id})")
-      upload! if ENV["PUBLISH"] == "1"
+      upload!(manifest) if ENV["PUBLISH"] == "1"
       manifest
     end
 
@@ -102,7 +102,7 @@ module OpenASNPipeline
         {
           id: src[:id], url: src[:url], license: src[:license],
           license_sha256: pins.dig(src[:id], "sha256"),
-          fetched_at: fetched_at_for(src[:id], http)
+          fetched_at: fetched_at_for(src[:id], http, build_id)
         }
       end
 
@@ -141,14 +141,36 @@ module OpenASNPipeline
       end
     end
 
-    def fetched_at_for(source_id, http)
-      key = {
-        "sapics-origin-asn" => Fetch::KEYS[:sapics_v4],
-        "ipverse-as-metadata" => Fetch::KEYS[:as_json],
-        "x4bnet-lists_vpn" => Fetch::KEYS[:x4b_vpn],
-        "brianhama-bad-asn-list" => Fetch::KEYS[:bad_asn]
-      }[source_id]
-      key ? http.fetched_at(key) : Time.now.utc.iso8601
+    # Manifest source id -> the fetch cache keys (Fetch::KEYS) whose bytes
+    # feed that source's contribution to the build. Multi-file sources
+    # report the OLDEST fetched_at among their files - "no input byte is
+    # older than this" is the claim a provenance consumer actually needs.
+    # (fetched_at values are ISO-8601 UTC strings, so String#min IS
+    # chronological order.)
+    SOURCE_FETCH_KEYS = {
+      "sapics-origin-asn"      => %i[sapics_v4 sapics_v6],
+      "ipverse-as-metadata"    => %i[as_json],
+      "x4bnet-lists_vpn"       => %i[x4b_vpn x4b_dc x4b_vpn_asn x4b_dc_asn],
+      "brianhama-bad-asn-list" => %i[bad_asn]
+    }.freeze
+
+    # Honest provenance only (this used to default to Time.now for anything
+    # unmapped, which stamped fiction into manifest.json):
+    #   * openasn-overrides    -> build_id: the data-repo checkout IS made at
+    #     build time in CI (nightly-build.yml checks it out fresh each run).
+    #   * ipverse-as-ip-blocks -> nil: fetched per-ASN on demand during
+    #     compile (compile.rb gap-fill), so there is no single timestamp.
+    #   * unknown ids          -> nil, so a future CATALOG addition surfaces
+    #     as missing provenance instead of a silently wrong timestamp
+    #     (test/publish_test.rb walks CATALOG to catch drift).
+    def fetched_at_for(source_id, http, build_id)
+      case source_id
+      when "openasn-overrides" then build_id
+      when "ipverse-as-ip-blocks" then nil
+      else
+        keys = SOURCE_FETCH_KEYS.fetch(source_id) { return nil }
+        keys.filter_map { |k| http.fetched_at(Fetch::KEYS[k]) }.min
+      end
     end
 
     # manifest.json is deliberately NOT in SHA256SUMS: it is the checksum
@@ -161,13 +183,80 @@ module OpenASNPipeline
       File.write(File.join(DIST_DIR, "SHA256SUMS"), lines.join("\n") + "\n")
     end
 
+    # ------------------------------------------------------------------
+    # GitHub "Latest" badge semantics - THE gotcha of this stage.
+    #
+    # GitHub has two asset-URL shapes that look interchangeable but are not:
+    #
+    #   releases/download/<TAG>/<file>   - addressed by TAG. Stable. This is
+    #                                      what we tell every consumer to use
+    #                                      (our rolling tag is literally
+    #                                      named "latest").
+    #   releases/latest/download/<file>  - addressed by the "Latest" BADGE,
+    #                                      i.e. whatever release GitHub
+    #                                      currently marks as latest.
+    #     https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases
+    #
+    # The badge is assigned at release creation: the REST param `make_latest`
+    # DEFAULTS TO "true" for every newly published release
+    # (https://docs.github.com/en/rest/releases/releases#create-a-release),
+    # and `gh release create` sends nothing unless you pass --latest/
+    # --latest=false (https://cli.github.com/manual/gh_release_create).
+    #
+    # INCIDENT 2026-07-05 (first Sunday after going public): the first weekly
+    # dated snapshot was created without --latest=false, stole the badge from
+    # the rolling release, and `releases/latest/download/...` began serving
+    # the frozen snapshot - which would have gone up to 6 days stale before
+    # anyone noticed. Hence, invariants enforced below and unit-tested in
+    # test/publish_test.rb:
+    #
+    #   1. dated releases are ALWAYS created with --latest=false;
+    #   2. every nightly re-asserts --latest on the rolling release
+    #      (self-healing if a manual/human release ever steals the badge);
+    #   3. all notes/docs point consumers at the TAG-addressed URL form.
+    #
+    # Data-repo record of this decision: DECISIONS.md D-REL-1.
+    # ------------------------------------------------------------------
+
+    ROLLING_TITLE = "OpenASN data (rolling latest)"
+
+    # The gh invocations are built by pure functions (unit-testable without
+    # a gh binary or network; see test/publish_test.rb) and executed by gh!.
+
+    def rolling_create_args(manifest)
+      ["release", "create", RELEASE_TAG, "--repo", PUBLISH_REPO,
+       "--title", ROLLING_TITLE,
+       "--notes", rolling_release_notes(manifest),
+       "--latest"]
+    end
+
+    # `gh release edit` re-stamps the body with the current build and
+    # re-asserts the badge (invariant 2 above) after every asset upload.
+    def rolling_edit_args(manifest)
+      ["release", "edit", RELEASE_TAG, "--repo", PUBLISH_REPO,
+       "--title", ROLLING_TITLE,
+       "--notes", rolling_release_notes(manifest),
+       "--latest"]
+    end
+
+    # "--latest=false" MUST be a single argv element: gh only accepts the
+    # `=false` form for negating boolean flags ("--latest", "false" would be
+    # parsed as a stray positional arg).
+    def dated_create_args(tag, manifest, files)
+      ["release", "create", tag, "--repo", PUBLISH_REPO,
+       "--title", "OpenASN data #{tag}",
+       "--notes", dated_release_notes(tag, manifest),
+       "--latest=false",
+       *files]
+    end
+
     # Releases live on the DATA repo (PUBLISH_REPO = openasn/openasn) — the
     # public flagship where users download from and the gem's default
     # release_url points. This pipeline repo only compiles.
     # Requires: gh CLI authenticated with write access to PUBLISH_REPO
     # (locally: your gh login; in the data repo's Actions: its own
     # GITHUB_TOKEN, since the workflow runs in that repo).
-    def upload!
+    def upload!(manifest)
       unless system("gh --version", out: File::NULL, err: File::NULL)
         Env.fail_stage!("PUBLISH=1 but gh CLI is not available")
       end
@@ -175,9 +264,7 @@ module OpenASNPipeline
       repo_args = ["--repo", PUBLISH_REPO]
       unless system("gh", "release", "view", RELEASE_TAG, *repo_args, out: File::NULL, err: File::NULL)
         Env.log("creating rolling release '#{RELEASE_TAG}' on #{PUBLISH_REPO}")
-        ok = system("gh", "release", "create", RELEASE_TAG, *repo_args,
-                    "--title", "OpenASN data (rolling latest)",
-                    "--notes", rolling_release_notes, "--latest")
+        ok = system("gh", *rolling_create_args(manifest))
         Env.fail_stage!("could not create release #{RELEASE_TAG}") unless ok
       end
 
@@ -185,6 +272,14 @@ module OpenASNPipeline
       ok = system("gh", "release", "upload", RELEASE_TAG, *repo_args, *files, "--clobber")
       Env.fail_stage!("release upload failed") unless ok
       Env.log("publish: uploaded #{files.size} assets to #{PUBLISH_REPO} release '#{RELEASE_TAG}'")
+
+      # Assets are already uploaded, so a failure here cannot corrupt data -
+      # but a lost "Latest" badge silently misroutes every badge-URL consumer
+      # to stale bytes, so it still fails the nightly loudly (which opens the
+      # pipeline-failure issue via nightly-build.yml).
+      ok = system("gh", *rolling_edit_args(manifest))
+      Env.fail_stage!("rolling release edit failed (notes stamp + Latest badge re-assert; note: assets DID upload)") unless ok
+      Env.log("publish: rolling notes stamped (build #{manifest[:build_id]}), Latest badge asserted")
 
       # Weekly dated tag for version pinning (gem config: pin_version).
       # The workflow sets OPENASN_DATED_TAG on Sundays / manual dispatch.
@@ -194,20 +289,30 @@ module OpenASNPipeline
       if system("gh", "release", "view", tag, *repo_args, out: File::NULL, err: File::NULL)
         Env.log("dated release #{tag} already exists - skipping")
       else
-        ok = system("gh", "release", "create", tag, *repo_args,
-                    "--title", "OpenASN data #{tag}",
-                    "--notes", "Weekly pinnable snapshot. Prefer the rolling `latest` release for freshness.",
-                    *files)
+        ok = system("gh", *dated_create_args(tag, manifest, files))
         Env.fail_stage!("could not create dated release #{tag}") unless ok
-        Env.log("publish: cut dated release #{tag}")
+        Env.log("publish: cut dated release #{tag} (badge stays on '#{RELEASE_TAG}')")
       end
     end
 
-    def rolling_release_notes
+    # Release bodies are HUMAN-facing convenience; machines must keep reading
+    # manifest.json (build_id, per-file SHA-256, provenance). The build stamp
+    # below is still deliberately grep-able (backticked ISO-8601) for quick
+    # shell checks. KEEP the badge-form warning and its URL on one physical
+    # line - test/publish_test.rb asserts any badge-form mention sits on a
+    # "do not use" line, so a reflow here will fail the suite (that's the
+    # point: the warning must never drift apart from the URL it warns about).
+    def rolling_release_notes(manifest)
+      counts = manifest.dig(:stats, :layer_counts) || {}
       <<~NOTES
-        Nightly-updated OpenASN data artifacts. **Always fetch via
-        `releases/latest/download/<file>`** - assets here are replaced every
-        night by CI.
+        Nightly-updated OpenASN data artifacts.
+
+        **Current build: `#{manifest[:build_id]}`** · #{counts[:base_ipv4]} IPv4 / #{counts[:base_ipv6]} IPv6 base records · IPv4 overlays: #{counts[:vpn_ipv4]} vpn, #{counts[:dc_ipv4]} dc
+
+        **Always fetch via the tag-addressed form** `releases/download/latest/<file>`, e.g.
+        `https://github.com/#{PUBLISH_REPO}/releases/download/latest/manifest.json` —
+        assets here are replaced every night by CI.
+        Do NOT use `releases/latest/download/<file>` — that shape resolves via GitHub's "Latest" badge, not this tag, and can silently serve a stale weekly snapshot (see the data repo's DECISIONS.md D-REL-1).
 
         | File | What |
         |---|---|
@@ -218,7 +323,23 @@ module OpenASNPipeline
         | `ATTRIBUTION.md` | upstream attributions |
         | `SHA256SUMS` | `sha256sum -c` compatible checksums |
 
+        Need a build that never changes underneath you? Pin a weekly dated release (`YYYY-MM-DD` tags).
         Data license: CC0-1.0. Code: MIT.
+      NOTES
+    end
+
+    def dated_release_notes(tag, manifest)
+      counts = manifest.dig(:stats, :layer_counts) || {}
+      <<~NOTES
+        Weekly pinnable snapshot — build `#{manifest[:build_id]}`. Assets on this tag are never rewritten.
+
+        #{counts[:base_ipv4]} IPv4 / #{counts[:base_ipv6]} IPv6 base records · IPv4 overlays: #{counts[:vpn_ipv4]} vpn, #{counts[:dc_ipv4]} dc
+
+        Pin it from the gem (`config.pin_version = "#{tag}"`) or download directly:
+        `https://github.com/#{PUBLISH_REPO}/releases/download/#{tag}/<file>`
+
+        For freshness prefer the rolling release — replaced nightly at the tag-addressed URL
+        `https://github.com/#{PUBLISH_REPO}/releases/download/latest/<file>`.
       NOTES
     end
   end
