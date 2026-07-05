@@ -33,6 +33,15 @@ The **nightly build workflow lives in the data repo** (`.github/workflows/nightl
 | validate | `pipeline/validate.rb` | round-trip re-find, size sanity, ±20% deltas, the spot panel, orgs checks |
 | publish | `pipeline/publish.rb` | manifest with provenance, SHA256SUMS, convenience CSV, release upload |
 
+## Flags are evidence, not product labels
+
+The compiler packs raw category, network-role, and OpenASN flag bits into the OASN artifacts. Client libraries turn those bits into the public verdict enum. Keep that boundary intact:
+
+- `category=isp` is raw ASN metadata; clients usually expose it as `verdict=residential_isp` unless a stronger overlay wins.
+- `bad_asn` means membership in `brianhama/bad-asn-list`, a curated hosting/cloud/colo ASN list. It is an infrastructure signal, not a claim of abuse.
+- `x4b_dc`, `x4b_vpn`, cloud-provider overlays, and Tier B overlays may all be true for related ranges. The client precedence ladder decides which source wins and what appears in `Result#sources`.
+- Provider attribution belongs to exact overlay hits. Do not widen exact provider IPs to nearby prefixes in the compiler unless the data repo has documented the false-positive tradeoff and exposed it as context-only.
+
 ## Running it
 
 ```bash
