@@ -299,9 +299,13 @@ module OpenASNPipeline
 
       # Weekly dated tag for version pinning (gem config: pin_version).
       # The workflow sets OPENASN_DATED_TAG on Sundays / manual dispatch.
+      # Tag format vYYYY.MM.DD — the cross-project release-naming standard
+      # (VehiclesDB uses vYYYY.MM.P for its monthly cadence): v-prefixed,
+      # dot-separated, hyphen-free, lexicographic order == chronological.
+      # Pre-standard tags (2026-07-05 style) remain valid pin targets.
       return unless ENV["OPENASN_DATED_TAG"] == "1"
 
-      tag = Time.now.utc.strftime("%Y-%m-%d")
+      tag = Time.now.utc.strftime("v%Y.%m.%d")
       if system("gh", "release", "view", tag, *repo_args, out: File::NULL, err: File::NULL)
         Env.log("dated release #{tag} already exists - skipping")
       else
