@@ -34,6 +34,42 @@ task "overrides:candidates" do
   ruby "pipeline/tools/override_candidates.rb"
 end
 
+# --- LLM enrichment pilot (operator tooling; never part of `rake build`) ----
+# The nightly build must stay LLM-free and deterministic — these tasks spend
+# operator money/quota and are always invoked by hand. See pipeline/enrich/.
+
+desc "LLM classification pilot vs our gold set (ARM=both|local|enriched LIMIT=n BATCH=12 FETCH=1)"
+task "enrich:pilot" do
+  ruby "pipeline/enrich/pilot.rb"
+end
+
+desc "Resume a killed pilot from its saved gold+packets: rake 'enrich:resume[pilot-YYYYMMDD-HHMMSS]'"
+task "enrich:resume", [:dir] do |_t, args|
+  require_relative "pipeline/enrich/pilot"
+  OpenASNPipeline::Enrich::Pilot.resume(args.fetch(:dir))
+end
+
+# Both debug tasks build packets through Pilot.build_packet — the same code
+# path enrich:pilot uses — so debug output can never drift from what the
+# pilot actually feeds the model.
+desc "Debug: evidence packet for one ASN: rake 'enrich:evidence[3352]' (EXTERNAL=0 for local-only)"
+task "enrich:evidence", [:asn] do |_t, args|
+  require_relative "pipeline/enrich/pilot"
+  packet = OpenASNPipeline::Enrich::Pilot.build_packet(Integer(args[:asn]),
+                                                       external: ENV["EXTERNAL"] != "0")
+  puts JSON.pretty_generate(packet)
+end
+
+desc "Debug: classify one ASN end-to-end through the LLM: rake 'enrich:classify[3352]'"
+task "enrich:classify", [:asn] do |_t, args|
+  require_relative "pipeline/enrich/pilot"
+  packet = OpenASNPipeline::Enrich::Pilot.build_packet(Integer(args[:asn]))
+  llm = OpenASNPipeline::Enrich::LlmClient.new
+  puts "backend=#{llm.backend} model=#{llm.model}"
+  result = llm.classify_batch([packet]).first
+  puts JSON.pretty_generate(result.to_h_compact)
+end
+
 desc "Classify one IP against the artifacts in build/dist/ (debugging aid): rake 'lookup[8.8.8.8]'"
 task :lookup, [:ip] do |_t, args|
   require "ipaddr"

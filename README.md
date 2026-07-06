@@ -58,6 +58,40 @@ rake licenses:check              # verify upstream license pins without building
 
 Requirements: Ruby ≥ 3.2, `jq` recommended (streams the ~69MB ipverse JSON; a stdlib fallback exists but is memory-hungry), `gh` CLI for publishing.
 
+## Enrichment tooling (operator-run, never part of the build)
+
+`pipeline/enrich/` is an LLM-assisted **curation aid**: it drafts ASN
+classification candidates that humans review and graduate through normal
+data-repo PRs. The rule it exists to serve: **LLMs draft labels; OpenASN
+publishes reviewed evidence.** Three invariants are load-bearing:
+
+- **The nightly build never calls an LLM.** These tasks spend operator
+  money/quota and are always invoked by hand; `rake build` and
+  `pipeline/run.rb` do not touch this directory.
+- **LLM output never writes to `data/overrides/`.** Everything lands under
+  gitignored `build/` as review queues; only human-reviewed, source-commented
+  lines reach the data repo, enforced by its lint.
+- **Measure before trusting.** The pilot scores the classifier against a gold
+  set built from OpenASN's own hand-curated labels before any candidate is
+  taken seriously (per-label precision/recall, confidence calibration, and a
+  full miss listing land in `build/work/enrich/pilot-*/report.md`).
+
+```bash
+rake enrich:pilot                 # score LLM classification vs our gold set
+                                  #   ARM=local|enriched|both LIMIT=n BATCH=n FETCH=1
+rake 'enrich:resume[pilot-<id>]'  # continue a killed run (per-batch checkpoints)
+rake 'enrich:evidence[3352]'      # debug: the evidence packet for one ASN
+rake 'enrich:classify[3352]'      # debug: one ASN end-to-end through the LLM
+```
+
+Backends (auto-detected, `OPENASN_ENRICH_BACKEND` to force): `claude` CLI (no
+key needed), Anthropic API, or OpenAI API — both APIs with strict structured
+outputs. Spend is capped per run (`OPENASN_ENRICH_MAX_CALLS`). External
+evidence fetchers (RIPEstat, PeeringDB, RDAP, reverse DNS, website titles)
+consult sources **per-record** with rate caps and an identifying User-Agent,
+cache under `build/cache/enrich/`, and never republish fetched text — the
+legal posture is documented at the top of `pipeline/enrich/fetchers.rb`.
+
 ## License
 
 MIT (see LICENSE). The compiled data artifacts are CC0 — the open-data contract, gates, and full provenance story live in the [data repo](https://github.com/openasn/openasn).
