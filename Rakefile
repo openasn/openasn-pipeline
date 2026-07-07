@@ -70,6 +70,15 @@ task "enrich:classify", [:asn] do |_t, args|
   puts JSON.pretty_generate(result.to_h_compact)
 end
 
+desc "Layer-A quant importer (no LLM): CAIDA AS Rank + RIR stats -> build/enrich/quant.jsonl. PAGES=n / RIRS=arin,ripencc bound it for a sample run."
+task "enrich:quant" do
+  require_relative "pipeline/enrich/quant/build"
+  pages = ENV["PAGES"] && Integer(ENV["PAGES"])
+  rirs  = ENV["RIRS"]&.split(",")
+  stats = OpenASNPipeline::Quant::Build.run(caida_pages: pages, rirs: rirs)
+  puts "quant: #{stats.inspect}"
+end
+
 desc "Classify one IP against the artifacts in build/dist/ (debugging aid): rake 'lookup[8.8.8.8]'"
 task :lookup, [:ip] do |_t, args|
   require "ipaddr"
