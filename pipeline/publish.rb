@@ -218,22 +218,26 @@ module OpenASNPipeline
     # Data-repo record of this decision: DECISIONS.md D-REL-1.
     # ------------------------------------------------------------------
 
-    # Release titles are DATE-FIRST and re-stamped on every publish, because
-    # the title is the only freshness signal the repo-home sidebar gives us:
-    # the sidebar's relative time ("17 hours ago") is the release object's
-    # CREATION time, which never advances for a rolling release whose assets
-    # are merely re-uploaded - by design it looks ever-staler. The sidebar
-    # also truncates titles at roughly 25-30 chars (observed 2026-07-05:
-    # "OpenASN data (rolling lat..."), so the date must LEAD the title or it
-    # is the part that gets cut. Both titles share the "<date> · OpenASN
-    # data" prefix; the suffix disambiguates rolling vs pinned in the
-    # releases list (on Sundays both carry the same date).
+    # Release titles are re-stamped on every publish, because the title is
+    # the only freshness signal the repo-home sidebar gives us: the sidebar's
+    # relative time ("17 hours ago") is the release object's CREATION time,
+    # which never advances for a rolling release whose assets are merely
+    # re-uploaded - by design it looks ever-staler. The sidebar also truncates
+    # titles at roughly 25-30 chars (observed 2026-07-05), so the date must
+    # clear that cut. Both titles follow the cross-project "<Project>
+    # <dotted-version>" standard shared with VehiclesDB (which titles releases
+    # "VehiclesDB 2026.07.3"); here the version IS the date, so "OpenASN
+    # 2026.07.07" is project-named AND date-led at once — the short "OpenASN "
+    # lead (8 chars) keeps the full date inside the truncation window. The
+    # " · <stream>" suffix disambiguates OpenASN's two streams (rolling vs
+    # pinned) in the releases list — on Sundays both carry the same date.
+    # Dates are dotted (never hyphenated) to match the vYYYY.MM.DD tag family.
     def rolling_title(manifest)
-      "#{manifest.fetch(:build_id)[0, 10]} · OpenASN data — nightly rolling"
+      "OpenASN #{manifest.fetch(:build_id)[0, 10].tr('-', '.')} · Nightly rolling"
     end
 
     def dated_title(tag)
-      "#{tag} · OpenASN data — pinned snapshot"
+      "OpenASN #{tag.delete_prefix('v')} · Weekly snapshot"
     end
 
     # The gh invocations are built by pure functions (unit-testable without
@@ -302,7 +306,7 @@ module OpenASNPipeline
       # Tag format vYYYY.MM.DD — the cross-project release-naming standard
       # (VehiclesDB uses vYYYY.MM.P for its monthly cadence): v-prefixed,
       # dot-separated, hyphen-free, lexicographic order == chronological.
-      # Pre-standard tags (2026-07-05 style) remain valid pin targets.
+      # (The one pre-standard 2026-07-05 tag was renamed to v2026.07.05.)
       return unless ENV["OPENASN_DATED_TAG"] == "1"
 
       tag = Time.now.utc.strftime("v%Y.%m.%d")
@@ -343,7 +347,7 @@ module OpenASNPipeline
         | `ATTRIBUTION.md` | upstream attributions |
         | `SHA256SUMS` | `sha256sum -c` compatible checksums |
 
-        Need a build that never changes underneath you? Pin a weekly dated release (`YYYY-MM-DD` tags).
+        Need a build that never changes underneath you? Pin a weekly dated release (`vYYYY.MM.DD` tags).
         Data license: CC0-1.0. Code: MIT.
       NOTES
     end

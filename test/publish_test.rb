@@ -20,7 +20,7 @@ module OpenASNPipeline
     }.freeze
 
     def test_dated_release_never_takes_the_latest_badge
-      args = Publish.dated_create_args("2026-07-12", MANIFEST, ["a.bin", "b.bin"])
+      args = Publish.dated_create_args("v2026.07.12", MANIFEST, ["a.bin", "b.bin"])
       # Must be the single-argv `=false` form: REST make_latest defaults to
       # "true" for new releases, so omitting the flag re-creates the incident.
       assert_includes args, "--latest=false"
@@ -38,20 +38,25 @@ module OpenASNPipeline
       assert_equal %w[release edit latest], edit.first(3)
     end
 
-    def test_titles_lead_with_the_build_date
-      # The repo-home sidebar truncates titles (~25-30 chars) and its
-      # relative time is release CREATION time (never advances for a rolling
-      # release), so a leading ISO date in the title is the only freshness
-      # signal that reliably survives. Suffixes must differ so rolling vs
-      # pinned stay distinguishable on Sundays when both carry one date.
+    def test_titles_are_project_led_dotted_and_stream_disambiguated
+      # Titles follow the cross-project "<Project> <dotted-version>" standard
+      # (VehiclesDB titles "VehiclesDB 2026.07.3"); here the version IS the
+      # date, so "OpenASN 2026.07.05" is project-named and date-led at once.
+      # The short "OpenASN " lead keeps the date inside GitHub's ~25-char
+      # sidebar cut (the release's relative time is frozen CREATION time, so
+      # the title's date is the rolling release's only freshness signal).
+      # Dotted, never hyphenated; suffixes disambiguate rolling vs pinned on
+      # Sundays when both carry one date.
       rolling = Publish.rolling_title(MANIFEST)
-      dated   = Publish.dated_title("2026-07-12")
-      assert rolling.start_with?("2026-07-05 "), rolling
-      assert dated.start_with?("2026-07-12 "), dated
-      refute_equal Publish.dated_title("2026-07-05"), rolling
+      dated   = Publish.dated_title("v2026.07.12")
+      assert_equal "OpenASN 2026.07.05 · Nightly rolling", rolling
+      assert_equal "OpenASN 2026.07.12 · Weekly snapshot", dated
+      refute_includes rolling, "-" # dotted dates only, matches vYYYY.MM.DD tags
+      refute_includes dated, "-"
+      refute_equal Publish.dated_title("v2026.07.05"), rolling
       # Titles ride inside the same argv the badge flags do - pin placement.
       assert_includes Publish.rolling_edit_args(MANIFEST), rolling
-      assert_includes Publish.dated_create_args("2026-07-12", MANIFEST, []), dated
+      assert_includes Publish.dated_create_args("v2026.07.12", MANIFEST, []), dated
     end
 
     def test_notes_are_stamped_with_build_identity
