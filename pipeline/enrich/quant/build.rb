@@ -10,6 +10,7 @@ require_relative "rir_stats"
 require_relative "apnic"
 require_relative "rpki"
 require_relative "prefixes"
+require_relative "rov"
 
 module OpenASNPipeline
   module Quant
@@ -46,6 +47,9 @@ module OpenASNPipeline
                     fields: %w[rpki_roas] },
         prefixes: { name: "bgp.tools full table", url: ->(_) { Prefixes::URL },
                     fields: %w[prefixes_v4 prefixes_v6 ipv4_addresses ipv6_addresses] },
+        rov:      { name: "RPKI RoV (rpki-client VRPs x bgp.tools table)",
+                    url: ->(_) { "#{Rpki::URL} + #{Prefixes::URL}" },
+                    fields: %w[rov_valid rov_invalid rov_notfound rpki_rov_status] },
       }.freeze
 
       module_function
@@ -53,7 +57,7 @@ module OpenASNPipeline
       # caida_pages / rirs bound the sample; apnic/rpki/prefixes booleans let a quick
       # sample skip the heavy pulls (bgp.tools 75MB, RPKI ~1M rows).
       def run(http: Http.new, as_of: Time.now.utc.strftime("%Y-%m-%d"),
-              caida_pages: nil, rirs: nil, apnic: true, rpki: true, prefixes: true)
+              caida_pages: nil, rirs: nil, apnic: true, rpki: true, prefixes: true, rov: true)
         Env.prepare_dirs!
         FileUtils.mkdir_p(File.dirname(OUT))
 
@@ -63,6 +67,8 @@ module OpenASNPipeline
           apnic:    (apnic    ? Apnic.fetch_all(http: http)    : {}),
           rpki:     (rpki     ? Rpki.fetch_all(http: http)     : {}),
           prefixes: (prefixes ? Prefixes.fetch_all(http: http) : {}),
+          # RoV reuses the cached VRP + bgp.tools files the two fetchers above pulled.
+          rov:      (rov      ? Rov.fetch_all(http: http)      : {}),
         }
         asns = rows.values.flat_map(&:keys).uniq.sort
 
@@ -103,8 +109,8 @@ module OpenASNPipeline
           "as_degree_peer"     => c["as_degree_peer"],
           "as_degree_provider" => c["as_degree_provider"],
         }
-        # Additive source blocks (eyeball / rpki / announced prefixes) — flat merge.
-        %i[apnic rpki prefixes].each do |k|
+        # Additive source blocks (eyeball / rpki count / announced prefixes / RoV) — flat merge.
+        %i[apnic rpki prefixes rov].each do |k|
           (rows[k] || {}).each { |field, val| quant[field] = val }
         end
 

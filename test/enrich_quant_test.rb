@@ -128,6 +128,53 @@ module OpenASNPipeline
         assert_nil rec["quant"]["caida_asrank"]
         assert_equal ["RIR delegated-extended stats"], rec["sources"].map { |s| s["source"] }
       end
+
+      # --- RoV / RFC 6811 -------------------------------------------------------
+      ROV_VRPS = <<~CSV
+        ASN,IP Prefix,Max Length,Trust Anchor,Expires
+        AS13335,1.0.0.0/24,24,apnic,1
+        AS3356,4.0.0.0/9,24,arin,1
+      CSV
+
+      def rov_state(cidr, origin)
+        idx, l4, l6 = Rov.build_index(StringIO.new(ROV_VRPS))
+        v6, net, len = Rov.parse_cidr(cidr)
+        Rov.classify(v6, net, len, origin, idx, v6 ? l6 : l4)
+      end
+
+      def test_rov_valid_exact_match
+        assert_equal :valid, rov_state("1.0.0.0/24", 13335)
+      end
+
+      def test_rov_invalid_wrong_origin
+        assert_equal :invalid, rov_state("1.0.0.0/24", 64500) # covered by AS13335's ROA, wrong origin
+      end
+
+      def test_rov_invalid_more_specific_than_maxlength
+        assert_equal :invalid, rov_state("1.0.0.128/25", 13335) # /25 under a /24-max ROA
+      end
+
+      def test_rov_valid_under_less_specific_roa
+        assert_equal :valid, rov_state("4.1.0.0/16", 3356) # covered by 4.0.0.0/9 max24; 16<=24, AS matches
+      end
+
+      def test_rov_notfound_no_covering_vrp
+        assert_equal :notfound, rov_state("8.8.8.0/24", 15169)
+      end
+
+      def test_rov_compute_aggregates_and_derives_status
+        table = <<~JSONL
+          {"CIDR":"1.0.0.0/24","ASN":13335,"Hits":1}
+          {"CIDR":"1.0.0.128/25","ASN":13335,"Hits":1}
+          {"CIDR":"8.8.8.0/24","ASN":15169,"Hits":1}
+        JSONL
+        idx, l4, l6 = Rov.build_index(StringIO.new(ROV_VRPS))
+        out = Rov.compute(StringIO.new(table), idx, l4, l6)
+        assert_equal 1, out[13335]["rov_valid"]
+        assert_equal 1, out[13335]["rov_invalid"]
+        assert_equal "has_invalids", out[13335]["rpki_rov_status"]
+        assert_equal "unknown", out[15169]["rpki_rov_status"] # only a not-found route
+      end
     end
   end
 end
