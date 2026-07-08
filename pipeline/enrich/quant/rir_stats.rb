@@ -5,15 +5,25 @@ require_relative "../../lib/http"
 
 module OpenASNPipeline
   module Quant
-    # RIR delegated-extended statistics — the authoritative bulk source for an
-    # ASN's allocation date, owning RIR, registered country and status, plus an
-    # opaque per-org hash that groups the ASNs one org holds (free sibling
-    # detection). Published openly by each of the 5 RIRs for anyone to use; the
-    # fields we keep are facts, CC0-safe.
+    # RIR delegated-extended statistics — the authoritative bulk source for an ASN's
+    # allocation date, owning RIR, registered country and status, plus an opaque
+    # per-org hash that groups the ASNs one org holds (free sibling detection).
+    # Published openly by each of the 5 RIRs; the fields we keep are facts, CC0-safe.
     #
     # Line format: rir|cc|type|start|count|date|status|opaque-id   (type == "asn")
-    # `date` is YYYYMMDD, or "00000000" for legacy/unknown allocations (e.g. the
-    # single-digit ASNs) — those become allocated=nil (never a fabricated date).
+    #
+    # BLOCK EXPANSION (fixed 2026-07-08 after the adversarial audit): an asn record
+    # with count>1 covers the CONTIGUOUS range [start, start+count) — e.g.
+    # `apnic|JP|asn|2497|32|20020405|allocated|A91A7381` delegates AS2497..AS2528.
+    # We MUST expand it: keying only on `start` (the old bug) left ~19,700 interior
+    # block members with null allocated/status/org_hash and broke org_hash sibling
+    # grouping. Every ASN in a block shares one row (same date/status/org_hash) — which
+    # is exactly the sibling signal.
+    #
+    # Sentinels -> nil (never a fabricated value): date "00000000" and the Unix-epoch
+    # "19700101" (impossible ASN allocation date); country "" / "*" / "ZZ" (RIR
+    # "unknown"). `status` is .strip'd because 7-field lines (no opaque-id column)
+    # leave a trailing newline on the last token.
     module RirStats
       FILES = {
         "arin"    => "https://ftp.arin.net/pub/stats/arin/delegated-arin-extended-latest",
@@ -25,28 +35,38 @@ module OpenASNPipeline
 
       module_function
 
+      # "" / whitespace -> nil (RIR lines can have an empty opaque-id column, e.g.
+      # `arin||asn|940|1||reserved|` -> f[7]="" ; an empty org_hash is meaningless and
+      # would falsely group unrelated reserved ASNs).
+      def blank_nil(s) = (s.nil? || s.strip.empty?) ? nil : s.strip
+
       # Parse a delegated-extended file body -> { asn(Integer) => Hash }. Pure.
       def parse(body)
         out = {}
         body.each_line do |line|
           f = line.split("|")
-          next unless f[2] == "asn"      # only ASN records
-          next if f[3] == "*"            # skip the "|*|asn|*|N|summary" header
-          asn = Integer(f[3].to_s, exception: false) or next
-          date = f[5].to_s
-          out[asn] = {
-            "rir"       => f[0],                                   # lowercase: arin/ripencc/...
-            "country"   => (f[1].to_s.empty? || f[1] == "*" ? nil : f[1]),
-            "allocated" => (date.length == 8 && date != "00000000" ? "#{date[0, 4]}-#{date[4, 2]}-#{date[6, 2]}" : nil),
-            "status"    => f[6],
-            "org_hash"  => f[7]&.strip,
+          next unless f[2] == "asn"   # only ASN records
+          next if f[3] == "*"         # skip the "|*|asn|*|N|summary" header
+          start = Integer(f[3].to_s, exception: false) or next
+          count = [f[4].to_i, 1].max
+          date  = f[5].to_s
+          cc    = f[1].to_s.strip
+          row = {
+            "rir"       => f[0],
+            "country"   => (cc.empty? || cc == "*" || cc == "ZZ" ? nil : cc),
+            "allocated" => (date.length == 8 && date != "00000000" && date != "19700101" ? "#{date[0, 4]}-#{date[4, 2]}-#{date[6, 2]}" : nil),
+            "status"    => f[6]&.strip,
+            "org_hash"  => blank_nil(f[7]),
           }
+          # Expand the delegation block: every ASN in [start, start+count) shares row
+          # (same allocation date/status/org_hash — this IS the sibling grouping).
+          (start...(start + count)).each { |asn| out[asn] = row }
         end
         out
       end
 
-      # Fetch all 5 RIR files (cached, conditional-GET, keep-last-good via Http)
-      # and merge -> { asn => Hash }. A dead RIR warns and is skipped.
+      # Fetch all 5 RIR files (cached, conditional-GET, keep-last-good via Http) and
+      # merge -> { asn => Hash }. A dead RIR warns and is skipped.
       def fetch_all(http: Http.new, only: nil)
         out = {}
         FILES.each do |rir, url|

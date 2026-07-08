@@ -20,6 +20,13 @@ module OpenASNPipeline
 
       module_function
 
+      # CAIDA returns "" (not null) for unknown source/asnName/country/orgId on
+      # reserved/unranked ASNs. "" is TRUTHY in Ruby, so left as-is it would shadow
+      # the authoritative RIR value in build.rb's `||` merge and leak meaningless
+      # empty strings (the adversarial audit caught rir="" / asn_name="" at scale).
+      # Normalize "" -> nil here, at the source.
+      def nn(s) = (s.nil? || s == "") ? nil : s
+
       # Parse one REST page body -> { asn(Integer) => Hash }. Pure; offline-testable.
       def parse_page(body)
         edges = JSON.parse(body).dig("data", "asns", "edges") || []
@@ -31,10 +38,10 @@ module OpenASNPipeline
           deg  = n["asnDegree"] || {}
           out[asn] = {
             "caida_asrank"       => n["rank"],
-            "asn_name"           => n["asnName"],
-            "rir"                => n["source"],          # "ARIN"/"RIPE"/... (uppercase)
-            "country"            => n.dig("country", "iso"),
-            "org_id"             => n.dig("organization", "orgId"),
+            "asn_name"           => nn(n["asnName"]),
+            "rir"                => nn(n["source"]),      # "ARIN"/"RIPE"/... (uppercase); "" -> nil
+            "country"            => nn(n.dig("country", "iso")),
+            "org_id"             => nn(n.dig("organization", "orgId")),
             "cone_asns"          => cone["numberAsns"],
             "cone_prefixes"      => cone["numberPrefixes"],
             "cone_addresses"     => cone["numberAddresses"],

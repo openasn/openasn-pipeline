@@ -39,7 +39,9 @@ module OpenASNPipeline
                     url: ->(row) { RirStats::FILES[row["rir"].to_s] || "https://ftp.arin.net/pub/stats/" },
                     fields: %w[rir country allocated status org_hash] },
         caida:    { name: "CAIDA AS Rank", url: ->(_) { Caida::BASE },
-                    fields: %w[caida_asrank asn_name cone_asns cone_prefixes cone_addresses
+                    # rir + country ARE provided by CAIDA (source/country) — listed here so
+                    # the ~19.8k CAIDA-only ASNs don't carry an unsourced rir/country (audit).
+                    fields: %w[rir country caida_asrank asn_name cone_asns cone_prefixes cone_addresses
                                as_degree_total as_degree_customer as_degree_peer as_degree_provider caida_org_id] },
         apnic:    { name: "APNIC AS-Pop (eyeball estimates)", url: ->(_) { Apnic::URL },
                     fields: %w[eyeball_users eyeball_pct_internet eyeball_rank] },
@@ -52,7 +54,32 @@ module OpenASNPipeline
                     fields: %w[rov_valid rov_invalid rov_notfound rpki_rov_status] },
       }.freeze
 
+      # Canonicalize a registry token — RIR-file lowercase ('ripencc'/'arin'/...) OR
+      # CAIDA's 'RIPE'/'JPNIC'/... (CAIDA emits National Internet Registries too) — to
+      # ONE of the 5 RIRs. NIRs roll up to their RIR (all Asian NIRs -> APNIC);
+      # 'ripencc' -> RIPE. Unknown token -> nil (so the merge falls back). (audit: the
+      # rir field was split RIPE/RIPENCC and carried the non-RIR value JPNIC.)
+      CANON_RIR = {
+        "arin" => "ARIN", "ripe" => "RIPE", "ripencc" => "RIPE", "apnic" => "APNIC",
+        "lacnic" => "LACNIC", "afrinic" => "AFRINIC",
+        "jpnic" => "APNIC", "krnic" => "APNIC", "cnnic" => "APNIC", "idnic" => "APNIC",
+        "irinn" => "APNIC", "twnic" => "APNIC", "vnnic" => "APNIC",
+      }.freeze
+
       module_function
+
+      def canon_rir(v)
+        v && !v.to_s.empty? ? CANON_RIR[v.to_s.downcase] : nil
+      end
+
+      # RFC-reserved / private-use / documentation ASNs are not globally-unique real
+      # networks and must not be enumerated as ASNs (audit: AS0 with 3939 disavowal
+      # ROAs, AS23456 AS_TRANS, private/doc ranges leaked in). AS0/RFC7607, AS23456/
+      # RFC6793, 64496-131071 (doc+private+reserved 16/32-bit per RFC5398/6996/7300),
+      # 4200000000-4294967295 (private + reserved 32-bit).
+      def bogon?(asn)
+        asn <= 0 || asn == 23_456 || asn.between?(64_496, 131_071) || asn.between?(4_200_000_000, 4_294_967_295)
+      end
 
       # caida_pages / rirs bound the sample; apnic/rpki/prefixes booleans let a quick
       # sample skip the heavy pulls (bgp.tools 75MB, RPKI ~1M rows).
@@ -70,7 +97,7 @@ module OpenASNPipeline
           # RoV reuses the cached VRP + bgp.tools files the two fetchers above pulled.
           rov:      (rov      ? Rov.fetch_all(http: http)      : {}),
         }
-        asns = rows.values.flat_map(&:keys).uniq.sort
+        asns = rows.values.flat_map(&:keys).uniq.reject { |a| bogon?(a) }.sort
 
         File.open(OUT, "w") do |f|
           asns.each { |asn| f.puts JSON.generate(record(asn, per_asn(rows, asn), as_of)) }
@@ -93,8 +120,8 @@ module OpenASNPipeline
 
         quant = {
           "asn"                => asn,
-          "rir"                => (c["rir"] || r["rir"]&.upcase),   # normalize to uppercase
-          "country"            => (r["country"] || c["country"]),   # prefer RIR registry country
+          "rir"                => (canon_rir(r["rir"]) || canon_rir(c["rir"])), # authoritative RIR file first; canonicalized to the 5 RIRs
+          "country"            => (r["country"] || c["country"]),   # prefer RIR registry country (both now nil empties)
           "allocated"          => r["allocated"],
           "status"             => r["status"],
           "org_hash"           => r["org_hash"],

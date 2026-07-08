@@ -32,12 +32,17 @@ module OpenASNPipeline
         arin|US|asn|3|1|00000000|assigned|d98c567cda2db06e693f2b574eafe848
         arin|US|asn|4|1|19840222|assigned|8f5d315929a560376b0b58b40a1932fa
         arin|US|asn|3356|1|20000310|assigned|589f9199b0aaaaaaaaaaaaaaaaaaaaaa
+        apnic|JP|asn|2497|3|20020405|allocated|A91A7381
+        ripencc|ZZ|asn|9999|1|20100101|available
       TXT
 
+      # One row per (AS, ECONOMY) — AS9999 spans two economies to guard the last-wins bug.
       APNIC = <<~JSON
         {"Date":"04/07/2026","Window":"60 Days","Data":[
-          {"rank":9,"AS":7922,"Description":"COMCAST","CC":"US","Users":43791898,"Percent of Internet":1.0494,"Samples":27316655},
-          {"rank":1,"AS":55836,"Description":"RELIANCEJIO-IN","CC":"IN","Users":297688551,"Percent of Internet":7.1336,"Samples":99449128}
+          {"rank":1,"AS":55836,"CC":"IN","Users":297688551,"Percent of Internet":7.1336},
+          {"rank":9,"AS":7922,"CC":"US","Users":43791898,"Percent of Internet":1.0494},
+          {"rank":50,"AS":9999,"CC":"US","Users":1000000,"Percent of Internet":0.5000},
+          {"rank":900,"AS":9999,"CC":"GB","Users":50000,"Percent of Internet":0.0200}
         ]}
       JSON
 
@@ -48,13 +53,15 @@ module OpenASNPipeline
         AS3356,4.0.0.0/9,24,arin,1783952256
       CSV
 
-      # /24 = 256 v4 addrs; /48 = 2^80 v6 addrs (the bignum-as-string case)
-      BGPTABLE = <<~JSONL
-        {"CIDR":"1.1.1.0/24","ASN":13335,"Hits":3359}
-        {"CIDR":"1.0.0.0/24","ASN":13335,"Hits":100}
-        {"CIDR":"2606:4700::/32","ASN":13335,"Hits":900}
-        {"CIDR":"0.0.0.0/0","ASN":0,"Hits":1}
-      JSONL
+      # CAIDA prefix2as: "prefix<TAB>len<TAB>AS". Real tabs (heredocs don't interpret \t),
+      # so build the fixture explicitly. AS may be MOAS ("AS1,AS2").
+      PFX2AS = [
+        "1.1.1.0\t24\t13335",
+        "1.0.0.0\t24\t13335",
+        "2606:4700::\t32\t13335",
+        "10.0.0.0\t8\t0",             # ASN0 -> dropped
+        "8.8.8.0\t24\t15169,396982",  # MOAS -> counts for BOTH origins
+      ].join("\n")
 
       def test_caida_page_parses_into_quant_fields
         r = Caida.parse_page(CAIDA_PAGE)[3356]
@@ -66,20 +73,34 @@ module OpenASNPipeline
         assert_equal "589f9199b0", r["org_id"]
       end
 
-      def test_rir_stats_parse_dates_and_skips_summary
+      def test_rir_stats_expands_blocks_strips_status_nils_sentinels
         rows = RirStats.parse(RIR_ARIN)
-        assert_equal [3, 4, 3356], rows.keys.sort
-        assert_nil rows[3]["allocated"]                     # 00000000 -> nil, NEVER fabricated
+        assert_nil rows[3]["allocated"]                       # 00000000 -> nil, never fabricated
         assert_equal "assigned", rows[3]["status"]
         assert_equal "d98c567cda2db06e693f2b574eafe848", rows[3]["org_hash"]
         assert_equal "1984-02-22", rows[4]["allocated"]
+        # BLOCK EXPANSION: apnic|JP|asn|2497|3 -> AS2497,2498,2499 (NOT 2500), sharing org_hash
+        assert_equal "2002-04-05", rows[2497]["allocated"]
+        assert_equal "2002-04-05", rows[2499]["allocated"]
+        assert_equal "A91A7381", rows[2499]["org_hash"]       # sibling shares the org hash
+        refute rows.key?(2500)                                # block is [2497, 2500)
+        # 7-field line: status stripped of the trailing newline; ZZ country -> nil;
+        # absent/empty opaque-id -> org_hash nil (not "")
+        assert_equal "available", rows[9999]["status"]
+        assert_nil rows[9999]["country"]
+        assert_nil rows[9999]["org_hash"]
       end
 
-      def test_apnic_eyeball_parse
+      def test_apnic_aggregates_multi_economy_rows_and_reranks
         rows = Apnic.parse(APNIC)
+        # AS9999 spans two economy rows -> SUMMED, not last-wins (the CRITICAL bug the audit caught)
+        assert_equal 1_050_000, rows[9999]["eyeball_users"]
+        assert_in_delta 0.52, rows[9999]["eyeball_pct_internet"], 0.0001
+        # eyeball_rank recomputed by TOTAL users: Jio(297M)=1, Comcast(43M)=2, AS9999(1.05M)=3
+        assert_equal 1, rows[55836]["eyeball_rank"]
+        assert_equal 2, rows[7922]["eyeball_rank"]
+        assert_equal 3, rows[9999]["eyeball_rank"]
         assert_equal 43_791_898, rows[7922]["eyeball_users"]
-        assert_equal 9, rows[7922]["eyeball_rank"]
-        assert_in_delta 7.1336, rows[55836]["eyeball_pct_internet"], 0.0001
       end
 
       def test_rpki_counts_roas_per_asn_and_skips_header
@@ -89,14 +110,16 @@ module OpenASNPipeline
         refute rows.key?("ASN") # header never becomes an ASN key
       end
 
-      def test_prefixes_counts_and_v6_bignum_as_string
-        rows = Prefixes.parse(BGPTABLE)
+      def test_prefixes_counts_v6_bignum_and_moas
+        rows = Prefixes.tally(PFX2AS)
         r = rows[13335]
         assert_equal 2, r["prefixes_v4"]
         assert_equal 1, r["prefixes_v6"]
-        assert_equal 512, r["ipv4_addresses"]               # two /24 = 512
-        assert_equal (2**96).to_s, r["ipv6_addresses"]      # one /32 = 2^96, kept exact as a string
-        refute rows.key?(0)                                 # ASN 0 (bogon) skipped
+        assert_equal 512, r["ipv4_addresses"]               # two /24
+        assert_equal (2**96).to_s, r["ipv6_addresses"]      # one /32, kept exact as a string
+        refute rows.key?(0)                                 # ASN0 dropped
+        assert_equal 1, rows[15169]["prefixes_v4"]          # MOAS attributed to each origin
+        assert_equal 1, rows[396982]["prefixes_v4"]
       end
 
       def test_record_merges_all_sources_with_provenance
@@ -162,18 +185,11 @@ module OpenASNPipeline
         assert_equal :notfound, rov_state("8.8.8.0/24", 15169)
       end
 
-      def test_rov_compute_aggregates_and_derives_status
-        table = <<~JSONL
-          {"CIDR":"1.0.0.0/24","ASN":13335,"Hits":1}
-          {"CIDR":"1.0.0.128/25","ASN":13335,"Hits":1}
-          {"CIDR":"8.8.8.0/24","ASN":15169,"Hits":1}
-        JSONL
-        idx, l4, l6 = Rov.build_index(StringIO.new(ROV_VRPS))
-        out = Rov.compute(StringIO.new(table), idx, l4, l6)
-        assert_equal 1, out[13335]["rov_valid"]
-        assert_equal 1, out[13335]["rov_invalid"]
-        assert_equal "has_invalids", out[13335]["rpki_rov_status"]
-        assert_equal "unknown", out[15169]["rpki_rov_status"] # only a not-found route
+      def test_rov_status_derivation
+        assert_equal "has_invalids", Rov.rov_status({ "rov_valid" => 3, "rov_invalid" => 1, "rov_notfound" => 0 })
+        assert_equal "all_valid",    Rov.rov_status({ "rov_valid" => 5, "rov_invalid" => 0, "rov_notfound" => 0 })
+        assert_equal "partial",      Rov.rov_status({ "rov_valid" => 2, "rov_invalid" => 0, "rov_notfound" => 4 })
+        assert_equal "unknown",      Rov.rov_status({ "rov_valid" => 0, "rov_invalid" => 0, "rov_notfound" => 7 })
       end
     end
   end
