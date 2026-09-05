@@ -177,17 +177,21 @@ module OpenASNPipeline
       floor = Crosscheck::MIN_HOSTING_ASNS
       return [] if published >= floor
 
-      # The honest size of the damage is the gap to a KNOWN-GOOD value (the
-      # newest healthy pin), not the gap to the floor — the floor is only
-      # the line under which we refuse to build.
+      # Report the gap to a KNOWN-GOOD value (the newest healthy pin) rather
+      # than to the floor, but state it as what it is: a shortfall in an
+      # upstream METRIC. It is not a count of degraded verdicts — most
+      # hosting-category ASNs have no routed IPv4 presence, so the
+      # consumer-visible damage is typically far smaller (2026-08-24:
+      # -24.6% on this metric, ~-2.8% on hosting verdicts in the artifact).
+      # Overstating this in an alert teaches operators to discount alerts.
       gap = healthy ? healthy - published : nil
       out.puts "  the published hosting count (#{published}) is BELOW today's floor (#{floor}) — " \
                "consumers are on a build that could not pass the gates."
       [format("Production is serving degraded data: `latest` has %d hosting ASNs, under the %d floor%s. " \
-              "Getting a green build published is urgent, not routine.",
+              "Getting a green build published is urgent, not routine. (This is the upstream metric, " \
+              "not a verdict count — measure the artifacts before quoting user impact.)",
               published, floor,
-              gap ? format(" and %d short of the last healthy build (%d) — that many ASNs that should " \
-                           "classify `hosting` are classifying `unknown` for every consumer", gap, healthy) : "")]
+              gap ? format(" and %d short of the last healthy build (%d)", gap, healthy) : "")]
     end
 
     def age_hours(build_id, now: Time.now.utc)

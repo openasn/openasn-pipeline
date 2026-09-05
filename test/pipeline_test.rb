@@ -589,7 +589,7 @@ module OpenASNPipeline
       assert_equal 2, problems.size
       assert_match(/SLOW SLIDE: the published hosting count is -24\.6% from the best weekly pin v2026\.08\.23 \(12393\)/,
                    problems[0])
-      assert_match(/Production is serving degraded data: `latest` has 9342 hosting ASNs, under the 10000 floor and 3051 short of the last healthy build \(12393\)/,
+      assert_match(%r{Production is serving degraded data: `latest` has 9342 hosting ASNs, under the 10000 floor and 3051 short of the last healthy build \(12393\)\. .*not a verdict count},
                    problems[1])
 
       # A normal night: plain PASS both ways, no deadlock banner, no action.
