@@ -278,11 +278,13 @@ module OpenASNPipeline
       r = enforce(now: 6_000, prev: 12_400, baselines: baselines(["v2026.08.16", 12_377]), ack: reason)
       assert_equal :acked, r.status
       refute r.blocking?
-      assert_match(/\[WARN\] crosscheck: drift ACKED hosting_asns: 12400 -> 6000 \(-51\.6% vs previous build\) - acknowledged: "ipverse reclassified/, log)
+      assert_match(/\[WARN\] crosscheck: drift ACKED hosting_asns: 12400 -> 6000 \(-51\.6% vs previous build\)/, log)
+      assert_match(/acknowledged: "ipverse reclassified/, log)
       stamp = DriftGate.manifest_stamp
       assert_equal reason, stamp[:drift_ack][:reason]
       assert_equal 1, stamp[:drift_ack][:gates].size
-      assert_match(/\Ahosting_asns: 12400 -> 6000 \(-51\.6% vs previous build\) - acknowledged:/, stamp[:drift_ack][:gates].first)
+      assert_match(%r{\Ahosting_asns: 12400 -> 6000 \(-51\.6% vs previous build\)}, stamp[:drift_ack][:gates].first)
+      assert_match(/acknowledged:/, stamp[:drift_ack][:gates].first)
 
       # A blank ack is no ack; whitespace is not a reason.
       assert_equal :fail, ev(now: 6_000, prev: 12_400, ack: "   ").status
@@ -360,7 +362,7 @@ module OpenASNPipeline
       # +5.7% above the only pin: not a snap-back, a new state -> FAIL.
       r = ev(now: 13_100, prev: 9_342, baselines: baselines(["v2026.08.23", 12_393]))
       assert_equal :fail, r.status
-      assert_nil r.baseline
+      assert r.blocking?, "a drop away from the healthy baseline must block, not recover"
       # ...but the ack still works there.
       assert_equal :acked, ev(now: 13_100, prev: 9_342, baselines: baselines(["v2026.08.23", 12_393]), ack: "ok").status
     end
@@ -415,16 +417,85 @@ module OpenASNPipeline
       r = ev(now: 12_442, prev: 9_342, baselines: pins)
       assert_equal :recovery, r.status
       refute r.slide
-      # A failing night stays a FAIL (not downgraded to a slide warning).
+      # A failing night stays a FAIL - never downgraded to a slide warning -
+      # but it DOES now carry the slide fact, because an operator deciding
+      # whether to ack needs to know the value is also far below every pin.
       r = ev(now: 8_000, prev: 12_393, baselines: pins)
       assert_equal :fail, r.status
-      refute r.slide
+      assert r.blocking?
+      assert r.slide
+      assert_in_delta(-0.354, r.slide_drift, 0.001)
       # A night that already warns on its own AND is sliding reports the slide.
       r = ev(now: 10_100, prev: 10_800, baselines: pins) # -6.5% night, -18.5% cumulative
       assert_equal :warn, r.status
       assert r.slide
       # Skipped stays skipped.
       assert_equal :skipped, ev(now: 10_100, prev: nil).status
+    end
+
+    # Adversarial review, 2026-09-05. Recovery turns a FAIL into a PASS, so it
+    # is the one rule that can ship bad data. Before these tests it was
+    # direction-agnostic AND pin-agnostic: any pin near the bad value rescued.
+    def test_recovery_never_rescues_a_drop_against_a_degraded_pin
+      healthy = ["v2026.08.23", 12_393]
+
+      # A failing DROP "rescued" by a pin cut from an already-degraded build.
+      # Every recovery assertion in this suite used to be a rise; this is the
+      # branch that had no coverage, and it published 1,250 lost labels.
+      r = ev(now: 11_150, prev: 12_400, baselines: baselines(["v2026.09.06", 11_300], healthy))
+      assert_equal :fail, r.status
+      assert r.blocking?, "a drop away from the healthy baseline must block, not recover"
+
+      # Worse: -19.3% in one night, still clearing the 10,000 floor, passing
+      # as :recovery with no ack and stamped as a good build.
+      r = ev(now: 10_001, prev: 12_400, baselines: baselines(["v2026.09.06", 10_300], healthy))
+      assert_equal :fail, r.status
+
+      # A pin only anchors a recovery if it agrees with the best pin.
+      assert DriftGate.healthy_pin?(DriftGate::Baseline.new(label: "x", value: 12_400),
+                                    DriftGate::Baseline.new(label: "a", value: 12_393), DriftGate::HOSTING_POLICY)
+      refute DriftGate.healthy_pin?(DriftGate::Baseline.new(label: "x", value: 11_300),
+                                    DriftGate::Baseline.new(label: "a", value: 12_393), DriftGate::HOSTING_POLICY)
+
+      # The real incident is untouched: a genuine snap-back still recovers.
+      r = ev(now: 12_442, prev: 9_342, baselines: baselines(healthy, ["v2026.08.16", 12_377]))
+      assert_equal :recovery, r.status
+      assert_equal "v2026.08.23", r.baseline.label
+
+      # Closest pin anchors, not the newest — the newest is likeliest degraded.
+      r = ev(now: 12_390, prev: 9_342, baselines: baselines(["v2026.09.06", 12_100], healthy))
+      assert_equal :recovery, r.status
+      assert_equal "v2026.08.23", r.baseline.label
+    end
+
+    # An auditor reading stats.drift_ack most needs to know the value they are
+    # sanctioning is also far below every known-good state. The slide used to
+    # be computed only on the pass/warn path, hiding exactly that.
+    def test_recovery_and_ack_still_report_the_slide
+      pins = baselines(["v2026.08.23", 12_393])
+      r = ev(now: 10_500, prev: 12_400, baselines: pins, ack: "verified")
+      assert_equal :acked, r.status
+      assert r.slide
+      assert_in_delta(-0.153, r.slide_drift, 0.001)
+      assert_equal "v2026.08.23", r.slide_from.label
+      assert_match(/a SLOW SLIDE no single night tripped - acknowledged: "verified"/, r.summary)
+    end
+
+    # A pin cut from a warned build poisons the recovery rule's only frozen
+    # reference. Sequence test — the incident was a state machine, and this
+    # hole is invisible to any single-evaluation test.
+    def test_a_warned_build_is_not_clean_so_publish_refuses_to_pin_it
+      assert DriftGate.clean?, "a fresh run with no gate events is clean"
+
+      enforce(now: 12_393, prev: 12_377) # ordinary pass
+      assert DriftGate.clean?, "a passing gate leaves the build pinnable"
+
+      enforce(now: 11_300, prev: 12_393, baselines: baselines(["v2026.08.16", 12_377])) # -8.8% warn
+      refute DriftGate.clean?, "a warned build must never be frozen as a weekly pin"
+
+      DriftGate.reset!
+      enforce(now: 12_442, prev: 9_342, baselines: baselines(["v2026.08.23", 12_393]))
+      refute DriftGate.clean?, "a recovery build is correct but not a known-good baseline"
     end
 
     def test_layer_policy_keeps_the_founding_20pct_lines_and_gains_a_warn_tier
@@ -493,7 +564,8 @@ module OpenASNPipeline
       assert_equal 11_000, stats[:hosting_asns]
       stamp = DriftGate.manifest_stamp
       assert_equal "operator verified: ipverse merged 1.4k hosting ASNs into parents", stamp[:drift_ack][:reason]
-      assert_match(/hosting_asns: 12393 -> 11000 \(-11\.2% vs previous build\) - acknowledged:/, stamp[:drift_ack][:gates].first)
+      assert_match(/\Ahosting_asns: 12393 -> 11000 \(-11\.2% vs previous build\)/, stamp[:drift_ack][:gates].first)
+      assert_match(/acknowledged:/, stamp[:drift_ack][:gates].first)
     ensure
       ENV.delete(DriftGate::ACK_ENV)
     end

@@ -109,7 +109,7 @@ module OpenASNPipeline
     # `slide` marks the boiled-frog case: night-over-night was fine, but the
     # value has drifted more than the drop line below the best weekly pin.
     Result = Struct.new(:metric, :status, :now, :prev, :prev_label, :drift, :baseline,
-                        :baseline_drift, :slide, :ack, :policy, keyword_init: true) do
+                        :baseline_drift, :slide, :slide_from, :slide_drift, :ack, :policy, keyword_init: true) do
       def blocking? = status == :fail
 
       # One-line, number-bearing account of the comparison - used verbatim
@@ -118,11 +118,12 @@ module OpenASNPipeline
         return "#{metric}: no previous build stats and no weekly pin - nothing to compare" if status == :skipped
 
         s = format("%s: %d -> %d (%s vs %s)", metric, prev, now, pct(drift), prev_label)
+        if baseline && !(slide && baseline == slide_from)
+          s += format("; within %s of weekly pin %s (%d)", pct(baseline_drift), baseline.label, baseline.value)
+        end
         if slide
           s += format("; but %s from the best weekly pin %s (%d) - a SLOW SLIDE no single night tripped",
-                      pct(baseline_drift), baseline.label, baseline.value)
-        elsif baseline
-          s += format("; within %s of weekly pin %s (%d)", pct(baseline_drift), baseline.label, baseline.value)
+                      pct(slide_drift), slide_from.label, slide_from.value)
         end
         s += %( - acknowledged: "#{ack}") if status == :acked
         s
@@ -165,19 +166,49 @@ module OpenASNPipeline
         elsif drift.abs <= policy.fail_for(drift) then :warn
         else :fail
         end
-      return check_slide(result, anchor) unless result.status == :fail
-
-      # Recovery: the world snapped back to where the pinned history says
-      # it belongs, so the PREVIOUS build was the outlier, not this one.
-      rescue_by = baselines.find { |b| ((now - b.value) / b.value.to_f).abs <= policy.recovery_band }
-      if rescue_by
-        result.baseline = rescue_by
-        result.baseline_drift = (now - rescue_by.value) / rescue_by.value.to_f
-        result.status = :recovery
-      elsif result.ack
-        result.status = :acked
+      if result.status == :fail
+        # Recovery: the world snapped back to where the pinned history says
+        # it belongs, so the PREVIOUS build was the outlier, not this one.
+        #
+        # A rescuing pin must ITSELF be healthy, i.e. within recovery_band of
+        # `anchor` (the best value the pins have seen). Without that test the
+        # rule is direction-agnostic and pin-agnostic, and licenses the exact
+        # opposite of a recovery: a FAILING DROP "rescued" by a pin that was
+        # cut from an already-degraded build. Concretely, before this check,
+        # 12,400 -> 11,150 (-10.1%) passed as :recovery against a 11,300 pin,
+        # and 12,400 -> 10,001 (-19.3%, 2,399 lost labels) passed against a
+        # 10,300 pin - published, unacked, and stamped stats.drift_recovery,
+        # so the audit trail actively asserted the build was good.
+        # Closest-first, not newest-first: when pins disagree the healthiest
+        # should anchor the decision, and the newest pin is the one most
+        # likely to have captured a degradation.
+        rescue_by = baselines
+                    .select { |b| healthy_pin?(b, anchor, policy) }
+                    .min_by { |b| ((now - b.value) / b.value.to_f).abs }
+        rescue_by = nil if rescue_by && ((now - rescue_by.value) / rescue_by.value.to_f).abs > policy.recovery_band
+        if rescue_by
+          result.baseline = rescue_by
+          result.baseline_drift = (now - rescue_by.value) / rescue_by.value.to_f
+          result.status = :recovery
+        elsif result.ack
+          result.status = :acked
+        end
       end
-      result
+      # The slide check runs on EVERY non-skipped outcome, including :recovery
+      # and :acked. An auditor reading stats.drift_ack most needs to know that
+      # the value they are sanctioning also sits far below every known-good
+      # state; computing the slide only on the pass/warn path hid exactly that.
+      check_slide(result, anchor)
+    end
+
+    # A pin is a usable recovery anchor only if it agrees with the best value
+    # the pinned history has seen. A lone pin is trivially "healthy" - with one
+    # reference there is no way to tell a good pin from a degraded one, which
+    # is why publish.rb refuses to cut a pin from an unclean build.
+    def healthy_pin?(pin, anchor, policy)
+      return true if anchor.nil? || pin.value == anchor.value
+
+      ((pin.value - anchor.value) / anchor.value.to_f).abs <= policy.recovery_band
     end
 
     # THE BOILED-FROG GUARD. Every night-vs-night threshold shares one blind
@@ -202,9 +233,15 @@ module OpenASNPipeline
       slide = (result.now - anchor.value) / anchor.value.to_f
       return result unless slide.negative? && slide.abs > result.policy.fail_drop
 
-      result.baseline = anchor
-      result.baseline_drift = slide
+      # Never clobber a recovery/ack baseline - the slide carries its own
+      # anchor so both facts can be reported on the same result.
       result.slide = true
+      result.slide_from = anchor
+      result.slide_drift = slide
+      unless result.baseline
+        result.baseline = anchor
+        result.baseline_drift = slide
+      end
       result.status = :warn if result.status == :pass
       result
     end
@@ -220,6 +257,7 @@ module OpenASNPipeline
       when :pass
         Env.log("#{prefix}drift PASS #{result.summary}; #{policy.describe}")
       when :warn
+        events << result
         if result.slide
           Env.warn("#{prefix}drift WARN(SLIDE) #{result.summary} - the cumulative move is past the " \
                    "#{(policy.fail_for(-1.0) * 100).to_i}% drop line even though no single night was. " \
@@ -250,8 +288,22 @@ module OpenASNPipeline
       result
     end
 
-    # Ack/recovery events accumulated during this run, in gate order. Read by
-    # publish.rb to stamp manifest.json; reset by tests.
+    # Non-clean outcomes accumulated during this run, in gate order: every
+    # WARN (slide included), RECOVERY and ACK. Read by publish.rb to stamp
+    # manifest.json and to decide whether this build may be PINNED; reset by
+    # tests.
+    # A build is clean only if no gate had anything to say. The weekly dated
+    # pins are the recovery rule's ONLY frozen reference, so a pin cut from a
+    # build the gates warned about poisons the one thing that can break a
+    # deadlock. Worked example (found by adversarial review, 2026-09-05):
+    # a -8.8% Sunday warn publishes and gets pinned at 11,300; a second warn
+    # a week later pins 10,300; when upstream fully recovers to 12,400 the
+    # move is +20.4% vs the degraded latest and NO surviving pin is within
+    # the recovery band - an identical FAIL every night, forever, with good
+    # data in hand. Refusing to pin an unclean build closes that with no new
+    # failure mode: the cost is one skipped pin, and the pin set only ages.
+    def clean? = events.empty?
+
     def events = (@events ||= [])
     def reset! = (@events = [])
 
