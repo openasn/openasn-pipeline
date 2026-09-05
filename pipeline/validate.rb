@@ -111,20 +111,28 @@ module OpenASNPipeline
     def check_deltas!(artifacts, previous_stats, baseline_stats = [])
       prev_counts = previous_stats && previous_stats["layer_counts"]
       pins = baseline_stats.select { |p| p.stats["layer_counts"] }
-      if prev_counts.nil? && pins.empty?
+      current = layer_counts(artifacts)
+
+      # Evaluate the UNION of what we build now, what the previous build had,
+      # and what the pins have - never just the previous manifest's keys.
+      # Otherwise a layer we add later is silently ungated until the next
+      # publish, and an empty/degenerate `layer_counts: {}` in the previous
+      # manifest turns the whole gate into a no-op that still logs a
+      # reassuring line ("0/0 layers"). A layer missing on one side is a
+      # SKIP (new layer) or a -100% FAIL (vanished layer), both loud.
+      layers = current.keys |
+               (prev_counts&.keys || []) |
+               pins.flat_map { |p| p.stats["layer_counts"].keys }
+      if layers.empty? || (prev_counts.nil? && pins.empty?)
         Env.log("G4: no previous build stats and no weekly pin - delta gate skipped (expected on first build)")
         return
       end
 
-      current = layer_counts(artifacts)
-      # A layer introduced after the previous build has no prev (0/nil) and
-      # DriftGate reports it as SKIP rather than a division by zero.
-      layers = (prev_counts || pins.first.stats["layer_counts"]).keys
       results = layers.map do |layer|
         DriftGate.enforce!(
           gate: "G4",
           metric: layer,
-          now: current.fetch(layer, 0),
+          now: current[layer], # nil (layer gone) reads as 0 -> -100% FAIL, see DriftGate.evaluate
           prev: prev_counts && prev_counts[layer],
           baselines: DriftGate.baselines_from(pins) { |s| s.dig("layer_counts", layer) },
           policy: LAYER_POLICY

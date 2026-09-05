@@ -479,6 +479,96 @@ module OpenASNPipeline
     end
   end
 
+  # `rake gates:status` — the operator's one-command answer to "is the
+  # nightly healthy?". Network calls are not exercised here; the reporting
+  # and the verdict logic are (they are what an operator acts on).
+  class GatesStatusTest < Minitest::Test
+    include DriftTestHelpers
+
+    def setup
+      super
+      require_relative "../pipeline/tools/gates_status"
+      @out = StringIO.new
+    end
+
+    def latest(hosting:, build_id: "2026-08-24T04:05:04Z")
+      { "build_id" => build_id, "stats" => { "hosting_asns" => hosting, "layer_counts" => { "base_ipv4" => 439_214 } } }
+    end
+
+    def test_stale_latest_is_reported_as_an_action_item
+      problems = GatesStatus.report_latest(latest(hosting: 9_342), @out)
+      assert_match(/latest: build 2026-08-24T04:05:04Z \(\d+\.\dh \/ \d+\.\d days old\)/, @out.string)
+      assert_match(/hosting_asns: 9342/, @out.string)
+      assert_equal 1, problems.size
+      assert_match(/the nightly has not published since 2026-08-24T04:05:04Z/, problems.first)
+
+      # A fresh latest is not an action item.
+      @out.truncate(@out.rewind)
+      assert_empty GatesStatus.report_latest(latest(hosting: 12_442, build_id: Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")), @out)
+
+      # An unreachable latest is the loudest problem of all.
+      assert_equal 1, GatesStatus.report_latest(nil, @out).size
+    end
+
+    # The forecast is the part that would have ended the incident on night
+    # one: it names a deadlock, and says whether it self-heals.
+    def test_forecast_names_a_deadlock_and_whether_it_self_heals
+      pins = [hosting_pin("v2026.08.23", 12_393), hosting_pin("v2026.08.16", 12_377)]
+
+      # The real 2026-09-05 state: day-over-day alone would FAIL forever;
+      # the weekly pins turn it into a recovery. Both verdicts are printed.
+      problems = GatesStatus.report_forecast(latest(hosting: 9_342), pins, @out)
+      assert_match(/forecast: a healthy upstream tonight \(hosting=12393\) vs latest \(9342\):/, @out.string)
+      assert_match(/day-over-day only: FAIL — hosting_asns: 9342 -> 12393 \(\+32\.7%/, @out.string)
+      assert_match(/with weekly pins:  RECOVERY — .*within \+0\.0% of weekly pin v2026\.08\.23/, @out.string)
+      assert_match(/DEADLOCK DETECTED, and the recovery rule clears it automatically/, @out.string)
+      # The published data being under today's floor is the one action item.
+      assert_equal 1, problems.size
+      assert_match(/Production is serving degraded data: `latest` has 9342 hosting ASNs, under the 10000 floor and 3051 short of the last healthy build \(12393\)/,
+                   problems.first)
+
+      # A normal night: plain PASS both ways, no deadlock banner, no action.
+      @out.truncate(@out.rewind)
+      assert_empty GatesStatus.report_forecast(latest(hosting: 12_400), pins, @out)
+      assert_match(/day-over-day only: PASS/, @out.string)
+      assert_match(/with weekly pins:  PASS/, @out.string)
+      refute_match(/DEADLOCK/, @out.string)
+
+      # No pin reachable: the recovery rule is disarmed, and that is itself
+      # an action item — it is the condition that made the incident possible.
+      @out.truncate(@out.rewind)
+      problems = GatesStatus.report_forecast(latest(hosting: 12_400), [], @out)
+      assert_match(/no weekly pin reachable — the recovery rule is DISARMED/, @out.string)
+      assert_equal 1, problems.size
+      assert_match(/no frozen baseline and a bad night could deadlock again/, problems.first)
+
+      # No published latest at all: say so, do not invent a verdict.
+      @out.truncate(@out.rewind)
+      assert_empty GatesStatus.report_forecast(nil, pins, @out)
+      assert_match(/no published `latest` hosting count/, @out.string)
+    end
+
+    def test_policy_block_prints_the_live_numbers_not_a_copy
+      GatesStatus.report_policy(@out)
+      assert_match(/hosting_asns  warn>5%, fail: drop>10% rise>20%/, @out.string)
+      assert_match(/absolute floor: hosting_asns >= #{Crosscheck::MIN_HOSTING_ASNS} \(NOT ackable\)/, @out.string)
+      assert_match(/OPENASN_ACK_DRIFT: not set \(normal\)/, @out.string)
+
+      ENV[DriftGate::ACK_ENV] = "verified: upstream merged ASNs"
+      @out.truncate(@out.rewind)
+      GatesStatus.report_policy(@out)
+      assert_match(/OPENASN_ACK_DRIFT: SET — "verified: upstream merged ASNs"/, @out.string)
+    ensure
+      ENV.delete(DriftGate::ACK_ENV)
+    end
+
+    def test_age_hours_never_raises_on_a_malformed_build_id
+      assert_nil GatesStatus.age_hours(nil)
+      assert_nil GatesStatus.age_hours("not-a-time")
+      assert_in_delta 24.0, GatesStatus.age_hours("2026-09-04T00:00:00Z", now: Time.utc(2026, 9, 5)), 0.01
+    end
+  end
+
   # validate.rb G4 through the same machinery: recovery, catastrophe, ack, skip.
   class ValidateDeltaGateTest < Minitest::Test
     include DriftTestHelpers
@@ -533,6 +623,34 @@ module OpenASNPipeline
       # A layer new since the previous build is SKIP for that layer only, never a division by zero.
       Validate.check_deltas!(artifacts, { "layer_counts" => counts.merge("base_ipv6" => 0) }, [])
       assert_match(/G4: drift SKIP base_ipv6/, log)
+    end
+
+    # The gate evaluates the UNION of current/previous/pin layers. Keying it
+    # off the previous manifest alone left two silent holes: a degenerate
+    # `layer_counts: {}` gated nothing while logging a reassuring "0/0
+    # layers", and a layer added after the last publish stayed unguarded.
+    def test_every_layer_is_evaluated_even_when_the_previous_manifest_is_thin
+      # Degenerate previous manifest: every layer must still be accounted for.
+      Validate.check_deltas!(artifacts, { "layer_counts" => {} }, [])
+      assert_equal 4, log.scan(/G4: drift SKIP/).size, log
+      refute_match(%r{0/0 layers}, log)
+
+      # A layer the previous build did not know about is still evaluated -
+      # against the pin, which does know it.
+      @log.truncate(@log.rewind)
+      Validate.check_deltas!(artifacts, { "layer_counts" => counts.reject { |k, _| k == "dc_ipv4" } },
+                             [pin("v2026.08.23", { "layer_counts" => counts })])
+      assert_equal 4, log.scan(/G4: drift (PASS|SKIP|WARN)/).size, log
+      assert_match(/G4: drift PASS dc_ipv4: 29070 -> 29064 \(-0\.0% vs weekly pin v2026\.08\.23\)/, log)
+
+      # A layer that VANISHES from the build is a -100% FAIL, never a skip.
+      @log.truncate(@log.rewind)
+      gone = artifacts
+      gone[:ipv4].counts.delete(:dc)
+      err = assert_raises(StageFailure) do
+        Validate.check_deltas!(gone, { "layer_counts" => counts }, [])
+      end
+      assert_match(/G4: drift FAIL dc_ipv4: 29070 -> 0 \(-100\.0% vs previous build\)/, err.message)
     end
   end
 

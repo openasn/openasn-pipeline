@@ -124,6 +124,11 @@ module OpenASNPipeline
     # stands in for it - a missing `latest` asset must not disarm the gate
     # while pins exist.
     def evaluate(metric:, now:, prev:, baselines: [], policy:, ack: ENV[ACK_ENV])
+      # A metric the build did not produce is ZERO, not nil: a layer that
+      # vanishes must read as a -100% FAIL, never crash the gate with a
+      # NoMethodError (which CI would report as "the pipeline broke", not
+      # "the data broke" - a very different, much slower investigation).
+      now = now.to_i
       baselines = baselines.select { |b| b.value.to_i.positive? }
       prev_label = "previous build"
       if prev.to_i.zero? && baselines.any?
