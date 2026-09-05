@@ -29,6 +29,7 @@ require_relative "lib/asjson"
 require_relative "lib/binary"
 require_relative "lib/sources"
 require_relative "lib/license_gate"
+require_relative "lib/drift_gate"
 require_relative "fetch"
 
 module OpenASNPipeline
@@ -116,19 +117,29 @@ module OpenASNPipeline
         build_id: build_id,
         files: files,
         sources: sources,
-        stats: {
-          layer_counts: {
-            base_ipv4: artifacts[:ipv4].counts[:base],
-            vpn_ipv4: artifacts[:ipv4].counts[:vpn],
-            dc_ipv4: artifacts[:ipv4].counts[:dc],
-            base_ipv6: artifacts[:ipv6].counts[:base]
-          }
-        }.merge(crosscheck_stats || {}),
+        stats: manifest_stats(artifacts, crosscheck_stats),
         signature: nil
       }
 
       File.write(File.join(DIST_DIR, "manifest.json"), JSON.pretty_generate(manifest) + "\n")
       manifest
+    end
+
+    # stats = layer counts + crosscheck figures + (only when something
+    # happened) the drift-gate audit trail: `drift_ack` carries the operator's
+    # OPENASN_ACK_DRIFT reason and the gate(s) it overrode, `drift_recovery`
+    # the gate(s) that passed as a snap-back to the weekly-pin baseline. Both
+    # are absent on a normal night, so the usual manifest shape is unchanged.
+    # (lib/drift_gate.rb; data-repo DECISIONS.md D-GATE-1)
+    def manifest_stats(artifacts, crosscheck_stats)
+      {
+        layer_counts: {
+          base_ipv4: artifacts[:ipv4].counts[:base],
+          vpn_ipv4: artifacts[:ipv4].counts[:vpn],
+          dc_ipv4: artifacts[:ipv4].counts[:dc],
+          base_ipv6: artifacts[:ipv6].counts[:base]
+        }
+      }.merge(crosscheck_stats || {}).merge(DriftGate.manifest_stamp)
     end
 
     def records_for(name, artifacts, path)

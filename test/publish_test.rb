@@ -92,6 +92,45 @@ module OpenASNPipeline
     end
   end
 
+  # The drift-gate audit trail reaches manifest.json through manifest_stats
+  # (data-repo DECISIONS.md D-GATE-1): an operator ack or a baseline recovery
+  # must be visible to anyone reading the published manifest, and a normal
+  # night must keep the exact pre-incident stats shape.
+  class PublishManifestStatsTest < Minitest::Test
+    FakeArtifact = Struct.new(:counts)
+    ARTIFACTS = { ipv4: FakeArtifact.new({ base: 439_214, vpn: 6_565, dc: 29_064 }),
+                  ipv6: FakeArtifact.new({ base: 126_073 }) }.freeze
+    CROSSCHECK = { hosting_asns: 12_442, reference_dc_asns: 902, reference_coverage: 0.9113 }.freeze
+
+    def setup = DriftGate.reset!
+    def teardown = DriftGate.reset!
+
+    def quiet(&) = Env.logger.tap { |l| l.level = Logger::FATAL }.then { yield }.tap { Env.logger.level = Logger::INFO }
+
+    def test_normal_night_keeps_the_pre_incident_shape
+      stats = Publish.manifest_stats(ARTIFACTS, CROSSCHECK)
+      assert_equal %i[layer_counts hosting_asns reference_dc_asns reference_coverage], stats.keys
+      assert_equal({ base_ipv4: 439_214, vpn_ipv4: 6_565, dc_ipv4: 29_064, base_ipv6: 126_073 }, stats[:layer_counts])
+    end
+
+    def test_ack_and_recovery_are_stamped_and_survive_json
+      quiet do
+        DriftGate.enforce!(gate: "crosscheck", metric: "hosting_asns", now: 12_442, prev: 9_342,
+                           baselines: [DriftGate::Baseline.new(label: "v2026.08.23", value: 12_393)],
+                           policy: DriftGate::HOSTING_POLICY, ack: nil)
+        DriftGate.enforce!(gate: "G4", metric: "dc_ipv4", now: 29_064, prev: 60_000, baselines: [],
+                           policy: DriftGate::LAYER_POLICY, ack: "x4b dc list halved on purpose (X4BNet/lists_vpn#77)")
+      end
+      stats = JSON.parse(JSON.generate(Publish.manifest_stats(ARTIFACTS, CROSSCHECK)))
+      assert_equal "x4b dc list halved on purpose (X4BNet/lists_vpn#77)", stats.dig("drift_ack", "reason")
+      assert_equal ["dc_ipv4: 60000 -> 29064 (-51.6% vs previous build) - acknowledged: \"x4b dc list halved on purpose (X4BNet/lists_vpn#77)\""],
+                   stats.dig("drift_ack", "gates")
+      assert_equal ["hosting_asns: 9342 -> 12442 (+33.2% vs previous build); within +0.4% of weekly pin v2026.08.23 (12393)"],
+                   stats["drift_recovery"]
+      assert_equal 12_442, stats["hosting_asns"] # crosscheck figures untouched
+    end
+  end
+
   class PublishFetchedAtTest < Minitest::Test
     FakeHttp = Struct.new(:times) do
       def fetched_at(key) = times[key]

@@ -11,7 +11,12 @@
 #   G3. Size sanity: ipv4 within 2-20MB (founding acceptance bound), ipv6 within
 #       1-40MB.
 #   G4. Layer-count deltas vs the previous published build within ±20%
-#       (skipped with a log line on the first build ever).
+#       (warn above 5%). Baseline-aware since 2026-09-05: a move that fails
+#       vs the previous build but sits within ±5% of a weekly pin passes as
+#       a recovery, and OPENASN_ACK_DRIFT="<reason>" downgrades a FAIL to a
+#       stamped WARN - the same machinery as the crosscheck drift gate
+#       (lib/drift_gate.rb), because G4 had the same deadlock shape.
+#       Skipped with a log line on the first build ever.
 #   G5. Spot-check panel (spotchecks.yml) passes 100%. The panel is a
 #       tripwire, not gospel: update expectations only via reviewed PR with
 #       a reason (routing changes happen - e.g. an IP moving providers).
@@ -22,22 +27,25 @@ require_relative "lib/env"
 require_relative "lib/binary"
 require_relative "lib/classifier"
 require_relative "lib/orgs"
+require_relative "lib/drift_gate"
 
 module OpenASNPipeline
   module Validate
-
-
     SIZE_BOUNDS = {
       ipv4: (2_000_000..20_000_000),
       ipv6: (1_000_000..40_000_000)
     }.freeze
 
-    DELTA_TOLERANCE = 0.20
+    # G4 policy: the founding ±20% fail lines are kept (layer counts move
+    # ~0.2%/week: base_ipv4 433,550 -> 439,199 over Jul 5 - Aug 23 2026);
+    # the 5% WARN tier, weekly-pin recovery and ack path are new.
+    LAYER_POLICY    = DriftGate::LAYER_POLICY
+    DELTA_TOLERANCE = LAYER_POLICY.fail_drop
     REFIND_SAMPLES  = 2_000
 
     module_function
 
-    def run(compiled, previous_stats: nil)
+    def run(compiled, previous_stats: nil, baseline_stats: [])
       artifacts = {
         ipv4: Binary::Artifact.new(compiled[:v4_path]),
         ipv6: Binary::Artifact.new(compiled[:v6_path])
@@ -47,7 +55,7 @@ module OpenASNPipeline
         check_size!(family, compiled)
         check_refind!(family, artifact, compiled)
       end
-      check_deltas!(artifacts, previous_stats)
+      check_deltas!(artifacts, previous_stats, baseline_stats)
       run_spotchecks!(artifacts)
       check_orgs!(compiled)
 
@@ -96,30 +104,38 @@ module OpenASNPipeline
       end
     end
 
-    def check_deltas!(artifacts, previous_stats)
-      unless previous_stats && previous_stats["layer_counts"]
-        Env.log("G4: no previous build stats - delta gate skipped (expected on first build)")
+    # `previous_stats` is the previous published manifest's stats (or nil);
+    # `baseline_stats` the weekly pins as Crosscheck::Pin structs. Per layer,
+    # DriftGate does the comparison, the log line, the recovery/ack logic
+    # and the raise - see lib/drift_gate.rb for the policy and its evidence.
+    def check_deltas!(artifacts, previous_stats, baseline_stats = [])
+      prev_counts = previous_stats && previous_stats["layer_counts"]
+      pins = baseline_stats.select { |p| p.stats["layer_counts"] }
+      if prev_counts.nil? && pins.empty?
+        Env.log("G4: no previous build stats and no weekly pin - delta gate skipped (expected on first build)")
         return
       end
 
       current = layer_counts(artifacts)
-      previous_stats["layer_counts"].each do |layer, prev|
-        prev = prev.to_i
-        next if prev.zero? # layer introduced after the previous build
-
-        now = current.fetch(layer, 0)
-        delta = (now - prev).abs / prev.to_f
-        next if delta <= DELTA_TOLERANCE
-
-        Env.fail_stage!(format("G4: layer %s moved %.1f%% (%d -> %d), tolerance ±%.0f%% - " \
-                               "either upstream broke or the world changed; investigate before publishing",
-                               layer, delta * 100, prev, now, DELTA_TOLERANCE * 100))
+      # A layer introduced after the previous build has no prev (0/nil) and
+      # DriftGate reports it as SKIP rather than a division by zero.
+      layers = (prev_counts || pins.first.stats["layer_counts"]).keys
+      results = layers.map do |layer|
+        DriftGate.enforce!(
+          gate: "G4",
+          metric: layer,
+          now: current.fetch(layer, 0),
+          prev: prev_counts && prev_counts[layer],
+          baselines: DriftGate.baselines_from(pins) { |s| s.dig("layer_counts", layer) },
+          policy: LAYER_POLICY
+        )
       end
       # Log the PASS too: a silent gate is indistinguishable from a skipped
       # one, which makes "did the delta gate actually run?" unanswerable
       # from a green CI log (cost us a log-archaeology session 2026-07-04).
-      summary = previous_stats["layer_counts"].map { |layer, prev| "#{layer} #{prev}→#{current.fetch(layer, 0)}" }.join(", ")
-      Env.log("G4: deltas within ±#{(DELTA_TOLERANCE * 100).to_i}% of previous build (#{summary})")
+      summary = results.map { |r| "#{r.metric} #{r.prev || '?'}→#{r.now}#{r.status == :pass ? '' : " [#{r.status.upcase}]"}" }.join(", ")
+      Env.log("G4: deltas gate done, #{results.count { |r| r.status == :pass }}/#{results.size} layers within " \
+              "±#{(LAYER_POLICY.warn * 100).to_i}% of #{results.first&.prev_label || 'previous build'} (#{summary})")
     end
 
     def layer_counts(artifacts)
