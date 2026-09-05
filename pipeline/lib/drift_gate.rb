@@ -55,6 +55,14 @@
 #   A false FAIL costs one lost night plus a one-command ack; a false PASS
 #   cost twelve days of degraded production data. The lines lean strict.
 #
+#   SLOW SLIDES are the blind spot every night-vs-night threshold shares: a
+#   move small enough to clear the warn line each night accumulates freely,
+#   and 4%/night for a week is the same -25% that, in one step, is the
+#   2026-08-24 defect. So every evaluation ALSO measures the total distance
+#   from the best value the weekly pins have seen, and warns loudly (status
+#   :warn, `slide` set) when that exceeds the drop line. Warn, not fail, on
+#   purpose - see check_slide for why a fail there would mint a new deadlock.
+#
 #   The same machinery guards G4 (per-layer artifact record counts), which
 #   had the identical deadlock shape; its founding +-20% lines are kept
 #   (layer counts move ~0.2%/week) and it gains the WARN tier, the weekly
@@ -98,8 +106,10 @@ module OpenASNPipeline
     #               of `baseline` (so `prev` was the anomaly): gate PASSES
     #   :acked    - beyond the fail line, operator ack present: gate PASSES
     #   :fail     - beyond the fail line, no rescue: gate FAILS the build
+    # `slide` marks the boiled-frog case: night-over-night was fine, but the
+    # value has drifted more than the drop line below the best weekly pin.
     Result = Struct.new(:metric, :status, :now, :prev, :prev_label, :drift, :baseline,
-                        :baseline_drift, :ack, :policy, keyword_init: true) do
+                        :baseline_drift, :slide, :ack, :policy, keyword_init: true) do
       def blocking? = status == :fail
 
       # One-line, number-bearing account of the comparison - used verbatim
@@ -108,7 +118,12 @@ module OpenASNPipeline
         return "#{metric}: no previous build stats and no weekly pin - nothing to compare" if status == :skipped
 
         s = format("%s: %d -> %d (%s vs %s)", metric, prev, now, pct(drift), prev_label)
-        s += format("; within %s of weekly pin %s (%d)", pct(baseline_drift), baseline.label, baseline.value) if baseline
+        if slide
+          s += format("; but %s from the best weekly pin %s (%d) - a SLOW SLIDE no single night tripped",
+                      pct(baseline_drift), baseline.label, baseline.value)
+        elsif baseline
+          s += format("; within %s of weekly pin %s (%d)", pct(baseline_drift), baseline.label, baseline.value)
+        end
         s += %( - acknowledged: "#{ack}") if status == :acked
         s
       end
@@ -130,6 +145,10 @@ module OpenASNPipeline
       # "the data broke" - a very different, much slower investigation).
       now = now.to_i
       baselines = baselines.select { |b| b.value.to_i.positive? }
+      # The best value the pinned history has seen, kept before `prev`
+      # substitution consumes the newest pin. This is the anchor for the
+      # slow-slide check below.
+      anchor = baselines.max_by(&:value)
       prev_label = "previous build"
       if prev.to_i.zero? && baselines.any?
         prev_label = "weekly pin #{baselines.first.label}"
@@ -146,7 +165,7 @@ module OpenASNPipeline
         elsif drift.abs <= policy.fail_for(drift) then :warn
         else :fail
         end
-      return result unless result.status == :fail
+      return check_slide(result, anchor) unless result.status == :fail
 
       # Recovery: the world snapped back to where the pinned history says
       # it belongs, so the PREVIOUS build was the outlier, not this one.
@@ -161,6 +180,35 @@ module OpenASNPipeline
       result
     end
 
+    # THE BOILED-FROG GUARD. Every night-vs-night threshold shares one blind
+    # spot: a slide small enough to clear the warn line each night accumulates
+    # without a single night ever tripping. 4% a night for a week is -25% and
+    # the gate never says a word - the same -25% that, taken in one step, is
+    # the 2026-08-24 defect. The weekly pins are the fix here too: measure the
+    # TOTAL distance from the best value the pinned history has seen.
+    #
+    # Deliberately a WARN, not a FAIL, and this is the one place the "lines
+    # lean strict" rule is knowingly not applied. A FAIL here would publish
+    # nothing; publishing nothing cuts no new pin; the anchor would therefore
+    # never move, and every subsequent night would fail against it - a NEW
+    # deadlock of exactly the shape D-GATE-1 exists to forbid. The hard stop
+    # for a slide that actually reaches dangerous territory is the absolute
+    # floor (crosscheck.rb MIN_HOSTING_ASNS), which does not move and cannot
+    # be acked. So: this warns early and loudly, `rake gates:status` reports
+    # it as an action item, and the floor is what refuses to build.
+    def check_slide(result, anchor)
+      return result if anchor.nil? || result.status == :skipped
+
+      slide = (result.now - anchor.value) / anchor.value.to_f
+      return result unless slide.negative? && slide.abs > result.policy.fail_drop
+
+      result.baseline = anchor
+      result.baseline_drift = slide
+      result.slide = true
+      result.status = :warn if result.status == :pass
+      result
+    end
+
     # Evaluate, log with numbers, record ack/recovery events for the
     # manifest, and raise StageFailure on :fail. Returns the Result.
     def enforce!(metric:, now:, prev:, baselines: [], policy:, ack: ENV[ACK_ENV], gate: nil)
@@ -172,8 +220,15 @@ module OpenASNPipeline
       when :pass
         Env.log("#{prefix}drift PASS #{result.summary}; #{policy.describe}")
       when :warn
-        Env.warn("#{prefix}drift WARN #{result.summary} - beyond the #{(policy.warn * 100).to_i}% warn line; " \
-                 "keep an eye on upstream (#{policy.describe})")
+        if result.slide
+          Env.warn("#{prefix}drift WARN(SLIDE) #{result.summary} - the cumulative move is past the " \
+                   "#{(policy.fail_for(-1.0) * 100).to_i}% drop line even though no single night was. " \
+                   "Investigate upstream NOW: this is how a silent degradation reaches production. " \
+                   "The absolute floor is the hard stop, not this warning")
+        else
+          Env.warn("#{prefix}drift WARN #{result.summary} - beyond the #{(policy.warn * 100).to_i}% warn line; " \
+                   "keep an eye on upstream (#{policy.describe})")
+        end
       when :recovery
         events << result
         Env.warn("#{prefix}drift RECOVERY #{result.summary} - the move fails the " \

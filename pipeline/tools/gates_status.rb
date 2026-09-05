@@ -145,8 +145,19 @@ module OpenASNPipeline
         DriftGate.evaluate(metric: "hosting_asns", now: healthy, prev: prev, baselines: baselines,
                            policy: DriftGate::HOSTING_POLICY, ack: nil)
       end
+      pin_baselines = DriftGate.baselines_from(pins) { |s| s["hosting_asns"] }
       bare = simulate.call([])
-      with = simulate.call(DriftGate.baselines_from(pins) { |s| s["hosting_asns"] })
+      with = simulate.call(pin_baselines)
+
+      # Is the CURRENTLY PUBLISHED value itself sliding away from the pins?
+      # (`now: prev` - we are grading latest, not a hypothetical tonight.)
+      published = DriftGate.evaluate(metric: "hosting_asns", now: prev, prev: prev,
+                                     baselines: pin_baselines, policy: DriftGate::HOSTING_POLICY, ack: nil)
+      if published.slide
+        problems << "SLOW SLIDE: the published hosting count is #{format('%+.1f%%', published.baseline_drift * 100)} " \
+                    "from the best weekly pin #{published.baseline.label} (#{published.baseline.value}) — a " \
+                    "cumulative degradation no single night tripped. Check upstream before it reaches the floor."
+      end
 
       out.puts "forecast: a healthy upstream tonight (hosting=#{healthy}) vs latest (#{prev}):"
       out.puts "  day-over-day only: #{bare.status.to_s.upcase} — #{bare.summary}"

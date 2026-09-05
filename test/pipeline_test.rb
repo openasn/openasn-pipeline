@@ -361,6 +361,68 @@ module OpenASNPipeline
       assert_equal :acked, ev(now: 13_100, prev: 9_342, baselines: baselines(["v2026.08.23", 12_393]), ack: "ok").status
     end
 
+    # The blind spot every night-vs-night threshold shares: 4% a night for a
+    # week is -25% and no single night trips. The weekly pins close it.
+    def test_a_slow_slide_that_never_trips_a_single_night_is_caught_against_the_pins
+      pins = baselines(["v2026.08.23", 12_393], ["v2026.08.16", 12_377])
+
+      # Night-over-night is a comfortable -4.2%; cumulatively we are 18.5%
+      # below the best pin. PASS becomes a WARN that names the slide.
+      r = ev(now: 10_100, prev: 10_542, baselines: pins)
+      assert_equal :warn, r.status
+      assert r.slide
+      refute r.blocking? # a slide never blocks - see check_slide's rationale
+      assert_equal "v2026.08.23", r.baseline.label
+      assert_in_delta(-0.185, r.baseline_drift, 0.001)
+      assert_equal "hosting_asns: 10542 -> 10100 (-4.2% vs previous build); but -18.5% from the best " \
+                   "weekly pin v2026.08.23 (12393) - a SLOW SLIDE no single night tripped", r.summary
+
+      # It logs as its own thing, not as an ordinary warn.
+      enforce(now: 10_100, prev: 10_542, baselines: pins)
+      assert_match(/\[WARN\] crosscheck: drift WARN\(SLIDE\) hosting_asns: 10542 -> 10100/, log)
+      assert_match(/SLOW SLIDE no single night tripped/, log)
+      assert_match(/cumulative move is past the 10% drop line even though no single night was/, log)
+      assert_match(/Investigate upstream NOW/, log)
+      assert_match(/absolute floor is the hard stop/, log)
+
+      # Within the drop line of the best pin: ordinary business, no slide.
+      r = ev(now: 11_500, prev: 11_600, baselines: pins) # -7.2% from the pin
+      assert_equal :pass, r.status
+      refute r.slide
+
+      # A RISE away from the pins is not a slide (blanks, not labels, are the
+      # upstream failure mode), and the day-over-day lines still judge it.
+      refute ev(now: 15_000, prev: 14_900, baselines: pins).slide
+
+      # No pins: nothing to slide against, and the gate must not invent one.
+      refute ev(now: 10_100, prev: 10_542).slide
+      # The anchor is the BEST pin, so a pin cut during a degraded week
+      # cannot lower the bar and hide the slide.
+      r = ev(now: 10_100, prev: 10_542, baselines: baselines(["v2026.08.30", 10_600], ["v2026.08.23", 12_393]))
+      assert_equal "v2026.08.23", r.baseline.label
+      assert r.slide
+    end
+
+    # The slide check must never turn a real recovery into a warning, nor
+    # take priority over a failing night.
+    def test_the_slide_check_never_overrides_the_night_over_night_verdict
+      pins = baselines(["v2026.08.23", 12_393], ["v2026.08.16", 12_377])
+      # The incident night: recovery still wins, no slide bookkeeping.
+      r = ev(now: 12_442, prev: 9_342, baselines: pins)
+      assert_equal :recovery, r.status
+      refute r.slide
+      # A failing night stays a FAIL (not downgraded to a slide warning).
+      r = ev(now: 8_000, prev: 12_393, baselines: pins)
+      assert_equal :fail, r.status
+      refute r.slide
+      # A night that already warns on its own AND is sliding reports the slide.
+      r = ev(now: 10_100, prev: 10_800, baselines: pins) # -6.5% night, -18.5% cumulative
+      assert_equal :warn, r.status
+      assert r.slide
+      # Skipped stays skipped.
+      assert_equal :skipped, ev(now: 10_100, prev: nil).status
+    end
+
     def test_layer_policy_keeps_the_founding_20pct_lines_and_gains_a_warn_tier
       p = DriftGate::LAYER_POLICY
       assert_equal [0.05, 0.20, 0.20, 0.05], [p.warn, p.fail_drop, p.fail_rise, p.recovery_band]
@@ -522,10 +584,13 @@ module OpenASNPipeline
       assert_match(/day-over-day only: FAIL — hosting_asns: 9342 -> 12393 \(\+32\.7%/, @out.string)
       assert_match(/with weekly pins:  RECOVERY — .*within \+0\.0% of weekly pin v2026\.08\.23/, @out.string)
       assert_match(/DEADLOCK DETECTED, and the recovery rule clears it automatically/, @out.string)
-      # The published data being under today's floor is the one action item.
-      assert_equal 1, problems.size
+      # Two action items: the published value has slid 24.6% below the pin,
+      # and it is under today's floor.
+      assert_equal 2, problems.size
+      assert_match(/SLOW SLIDE: the published hosting count is -24\.6% from the best weekly pin v2026\.08\.23 \(12393\)/,
+                   problems[0])
       assert_match(/Production is serving degraded data: `latest` has 9342 hosting ASNs, under the 10000 floor and 3051 short of the last healthy build \(12393\)/,
-                   problems.first)
+                   problems[1])
 
       # A normal night: plain PASS both ways, no deadlock banner, no action.
       @out.truncate(@out.rewind)
