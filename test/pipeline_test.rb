@@ -228,12 +228,16 @@ module OpenASNPipeline
   # lib/drift_gate.rb - the policy behind the 2026-08-24 -> 09-05 deadlock
   # fix (drift_gate.rb header; data-repo DECISIONS.md D-GATE-1). Numbers in
   # these tests are the real incident numbers: hosting ASNs 12,393 (Aug 23
-  # pin) -> 9,342 (Aug 24 degraded build, published) -> 12,442 (Aug 25+).
+  # pin) -> 9,342 (Aug 24 degraded build, published) -> 12,393 on Aug 25 and
+  # 12,442 by Sep 5. NB: the Aug 25 03:17 run saw 12,393, not 12,442 - the
+  # revert was still HEAD and that day's own commit landed 76 min after our
+  # cron. 12,442 is Sep 5 live data, which is what the online verification
+  # build actually compared, so both values appear here on purpose.
   class DriftGateTest < Minitest::Test
     include DriftTestHelpers
 
     def test_deadlock_scenario_passes_as_recovery
-      # Aug 25 as the task states it: prev = degraded latest, pin = Aug 16.
+      # Sep 5 live value vs the degraded latest, against the Aug 16 pin.
       r = ev(now: 12_442, prev: 9_342, baselines: baselines(["v2026.08.16", 12_377]))
       assert_equal :recovery, r.status
       refute r.blocking?
