@@ -16,6 +16,7 @@ require_relative "lib/env"
 require_relative "lib/http"
 require_relative "lib/license_gate"
 require_relative "lib/overrides"
+require_relative "lib/drift_gate"
 require_relative "fetch"
 require_relative "normalize"
 require_relative "crosscheck"
@@ -39,11 +40,26 @@ module OpenASNPipeline
 
       normalized = Normalize.run(paths)
 
-      previous = offline ? nil : Crosscheck.previous_stats(release_base_url)
-      crosscheck_stats = Crosscheck.run(normalized, previous_stats: previous)
+      # Drift-gate references (both skipped offline, loudly): the previous
+      # published build (rolling `latest`) and the two most recent weekly
+      # pins - the long-run baseline that makes a recovery distinguishable
+      # from a catastrophe (lib/drift_gate.rb; DECISIONS.md D-GATE-1).
+      if offline
+        Env.warn("OFFLINE: previous-manifest and weekly-pin fetches skipped - drift gates (crosscheck, G4) will SKIP")
+        previous = nil
+        baselines = []
+      else
+        previous  = Crosscheck.previous_stats(release_base_url)
+        baselines = Crosscheck.baseline_stats(release_root_url)
+      end
+      if DriftGate.normalize_ack(ENV[DriftGate::ACK_ENV])
+        Env.warn("#{DriftGate::ACK_ENV} is set (#{ENV[DriftGate::ACK_ENV].strip.inspect}): a drift FAIL this run " \
+                 "becomes a WARN and the reason is stamped into manifest.json")
+      end
+      crosscheck_stats = Crosscheck.run(normalized, previous_stats: previous, baseline_stats: baselines)
 
       compiled  = Compile.run(normalized, http: http, offline: offline)
-      artifacts = Validate.run(compiled, previous_stats: previous)
+      artifacts = Validate.run(compiled, previous_stats: previous, baseline_stats: baselines)
 
       Publish.run(compiled, normalized, crosscheck_stats, artifacts, http: http)
 
@@ -61,7 +77,13 @@ module OpenASNPipeline
     # overnight swing could slip through. Full write-up: pipeline/publish.rb
     # ("Latest badge semantics") and data-repo DECISIONS.md D-REL-1.
     def release_base_url
-      ENV.fetch("OPENASN_RELEASE_URL", "https://github.com/openasn/openasn/releases/download/latest/")
+      ENV.fetch("OPENASN_RELEASE_URL", "#{release_root_url}latest/")
+    end
+
+    # Root of the tag-addressed download URLs; weekly pins are fetched as
+    # "#{release_root_url}vYYYY.MM.DD/manifest.json".
+    def release_root_url
+      ENV.fetch("OPENASN_RELEASE_ROOT", "https://github.com/#{PUBLISH_REPO}/releases/download/")
     end
   end
 end
