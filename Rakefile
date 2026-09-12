@@ -101,3 +101,9 @@ task :clean do
 end
 
 task default: :test
+
+desc "Operator: is the nightly healthy? Ages of `latest` and the weekly pins, live gate thresholds, and whether tonight's drift gate would deadlock. Read-only."
+task "gates:status" do
+  require_relative "pipeline/tools/gates_status"
+  exit(1) unless OpenASNPipeline::GatesStatus.call
+end

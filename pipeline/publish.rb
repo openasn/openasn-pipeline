@@ -29,6 +29,7 @@ require_relative "lib/asjson"
 require_relative "lib/binary"
 require_relative "lib/sources"
 require_relative "lib/license_gate"
+require_relative "lib/drift_gate"
 require_relative "fetch"
 
 module OpenASNPipeline
@@ -116,19 +117,29 @@ module OpenASNPipeline
         build_id: build_id,
         files: files,
         sources: sources,
-        stats: {
-          layer_counts: {
-            base_ipv4: artifacts[:ipv4].counts[:base],
-            vpn_ipv4: artifacts[:ipv4].counts[:vpn],
-            dc_ipv4: artifacts[:ipv4].counts[:dc],
-            base_ipv6: artifacts[:ipv6].counts[:base]
-          }
-        }.merge(crosscheck_stats || {}),
+        stats: manifest_stats(artifacts, crosscheck_stats),
         signature: nil
       }
 
       File.write(File.join(DIST_DIR, "manifest.json"), JSON.pretty_generate(manifest) + "\n")
       manifest
+    end
+
+    # stats = layer counts + crosscheck figures + (only when something
+    # happened) the drift-gate audit trail: `drift_ack` carries the operator's
+    # OPENASN_ACK_DRIFT reason and the gate(s) it overrode, `drift_recovery`
+    # the gate(s) that passed as a snap-back to the weekly-pin baseline. Both
+    # are absent on a normal night, so the usual manifest shape is unchanged.
+    # (lib/drift_gate.rb; data-repo DECISIONS.md D-GATE-1)
+    def manifest_stats(artifacts, crosscheck_stats)
+      {
+        layer_counts: {
+          base_ipv4: artifacts[:ipv4].counts[:base],
+          vpn_ipv4: artifacts[:ipv4].counts[:vpn],
+          dc_ipv4: artifacts[:ipv4].counts[:dc],
+          base_ipv6: artifacts[:ipv6].counts[:base]
+        }
+      }.merge(crosscheck_stats || {}).merge(DriftGate.manifest_stamp)
     end
 
     def records_for(name, artifacts, path)
@@ -308,6 +319,24 @@ module OpenASNPipeline
       # dot-separated, hyphen-free, lexicographic order == chronological.
       # (The one pre-standard 2026-07-05 tag was renamed to v2026.07.05.)
       return unless ENV["OPENASN_DATED_TAG"] == "1"
+
+      # A PIN MUST BE A KNOWN-GOOD BUILD. Dated pins are immutable and are the
+      # drift gate's only frozen reference — the one thing that can break a
+      # publish deadlock (lib/drift_gate.rb; data-repo DECISIONS.md D-GATE-1).
+      # Freezing a build the gates warned about poisons exactly that reference:
+      # a -8.8% Sunday WARN publishes and gets pinned at 11,300, a second WARN
+      # a week later pins 10,300, and when upstream finally recovers to 12,400
+      # the move is +20.4% against the degraded `latest` with no surviving pin
+      # inside the recovery band — an identical FAIL every night, forever,
+      # with good data in hand. Skipping the pin costs one week of baseline
+      # freshness and cannot itself deadlock, because the pin set only ages.
+      unless DriftGate.clean?
+        Env.warn("publish: NOT cutting a dated pin — this build is not clean " \
+                 "(#{DriftGate.events.map(&:summary).join('; ')}). Pins are the drift gate's frozen " \
+                 "known-good reference; pinning a warned build would poison it. The rolling " \
+                 "'#{RELEASE_TAG}' release still published; the next clean build cuts the pin.")
+        return
+      end
 
       tag = Time.now.utc.strftime("v%Y.%m.%d")
       if system("gh", "release", "view", tag, *repo_args, out: File::NULL, err: File::NULL)
