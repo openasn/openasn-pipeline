@@ -343,6 +343,67 @@ module OpenASNPipeline
       assert_match(/classification_profile/, error.message)
     end
 
+    # --- the contract fixture through both formats ----------------------
+
+    # Every category, role, verdict and source token the profile can emit,
+    # carried by both writers and read back with an independent parser.
+    # This is what the DDL's CHECK lists and the CSV's plain text have to
+    # agree on: one misspelled vocabulary string is a row SQLite rejects or
+    # a consumer cannot switch on, and until this case existed most of those
+    # strings appeared in no writer test at all.
+    #
+    # The expected verdict and sources come from the vendored contract
+    # fixture, which is hand-specified; the round-trip equality is the
+    # property actually under test here.
+    def test_every_vocabulary_string_in_the_contract_fixture_survives_both_formats
+      cases = PROFILE_FIXTURE.fetch("cases")
+      records = cases.each_with_index.map { |kase, index| fixture_record(kase, index) }
+      db = build_database(records)
+      csv = Csv.write(File.join(@dir, "records.jsonl"), path: File.join(@dir, "openasn.csv")).path
+
+      from_csv = ::CSV.read(csv, headers: true).map do |row|
+        row.to_h.slice("asn", "as_org", "category", "network_role", "core_verdict")
+           .merge("core_sources" => row["core_sources"].split("|"))
+      end
+      from_db = python_json(<<~PY, db)
+        cols = "asn, as_org, category, network_role, core_verdict, core_sources"
+        rows = [dict(zip(cols.replace(" ", "").split(","), r))
+                for r in conn.execute("SELECT " + cols + " FROM v4 ORDER BY start")]
+        for r in rows:
+            r["core_sources"] = json.loads(r["core_sources"])
+        print(json.dumps(rows))
+      PY
+
+      assert_equal cases.length, from_csv.length
+      assert_equal cases.length, from_db.length
+      cases.each_with_index do |kase, index|
+        want = records[index]
+        label = kase.fetch("id")
+
+        [from_csv[index], from_db[index]].zip(%w[csv sqlite]).each do |got, format|
+          %w[as_org category network_role core_verdict core_sources].each do |field|
+            same(want[field], got[field], "#{label} #{field} via #{format}")
+          end
+          asn = got["asn"].is_a?(String) ? Integer(got["asn"], 10) : got["asn"]
+          same(want["asn"], asn, "#{label} asn via #{format}")
+        end
+
+        # And the fixture's own hand-specified expectation, so a writer that
+        # round-tripped a WRONG value consistently still fails.
+        assert_equal kase.fetch("verdict"), from_db[index]["core_verdict"], label
+        assert_equal kase.fetch("sources"), from_db[index]["core_sources"], label
+      end
+
+      # The coverage claim itself: if a future fixture drops a vocabulary
+      # name, this test says so instead of quietly stopping to test it.
+      seen = ->(field) { from_db.map { |row| row[field] }.compact.uniq }
+      assert_empty Contract::CATEGORIES - seen.call("category"), "categories never exported"
+      assert_empty Contract::NETWORK_ROLES - seen.call("network_role"), "network roles never exported"
+      assert_empty Contract::VERDICTS - seen.call("core_verdict"), "verdicts never exported"
+      assert_empty Contract::SOURCES - from_db.flat_map { |row| row["core_sources"] }.uniq,
+                   "source tokens never exported"
+    end
+
     # --- the cross-format gate itself -----------------------------------
 
     def test_the_validator_accepts_a_matching_pair_and_rejects_a_tampered_csv
@@ -432,6 +493,41 @@ module OpenASNPipeline
     end
 
     # --- helpers ---------------------------------------------------------
+
+    # The public contract fixture, vendored from the dataset repo's
+    # conformance directory and byte-identical to it.
+    PROFILE_FIXTURE = JSON.parse(
+      File.read(File.expand_path("fixtures/export-v1/profile-fixtures.json", __dir__))
+    ).freeze
+
+    # A null field is a real expected value here (no ASN means no org, no
+    # category, no role), and minitest wants assert_nil for it.
+    def same(want, got, message)
+      want.nil? ? assert_nil(got, message) : assert_equal(want, got, message)
+    end
+
+    # One fixture case as one exported interval. Intervals are spaced so no
+    # two are adjacent: coalescing is projection behaviour and has its own
+    # tests, and two adjacent identical payloads here would be a validator
+    # failure rather than a writer one.
+    def fixture_record(kase, index)
+      defaults = PROFILE_FIXTURE.fetch("defaults")
+      asn = kase.key?("asn") ? kase["asn"] : defaults.fetch("asn")
+      category, network_role, signals = Contract.decode_flags(kase.fetch("flags"))
+
+      payload = signals.to_h { |flag, value| [flag.to_s, value] }.merge(
+        "asn" => asn,
+        "as_org" => asn.nil? ? nil : "Org #{kase.fetch('id')}",
+        "category" => category,
+        "network_role" => network_role,
+        "vpn_range" => kase.fetch("vpn_range", defaults.fetch("vpn_range")),
+        "datacenter_range" => kase.fetch("datacenter_range", defaults.fetch("datacenter_range")),
+        "core_verdict" => kase.fetch("verdict"),
+        "core_sources" => kase.fetch("sources")
+      )
+      start = 0x01000000 + index * 16
+      record(4, format("%08x", start), format("%08x", start + 7), payload)
+    end
 
     # One spool object. `payload` overrides BLANK, so a case states only the
     # evidence it is about.
