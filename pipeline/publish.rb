@@ -86,8 +86,26 @@ module OpenASNPipeline
       FileUtils.cp(Env.fetch_manifest_path, File.join(DIST_DIR, "fetch-manifest.json"))
     end
 
-    def write_manifest(build_id, compiled, crosscheck_stats, artifacts, http)
+    # The source catalogue with its license pins and fetch timestamps. It is
+    # a PURE function of the catalog, the pin file and the fetch state, and
+    # it is extracted from write_manifest because the exports need the same
+    # array BEFORE a manifest exists: SQLite's `meta.sources` must mean
+    # exactly what manifest.json's `sources` means, and two constructions of
+    # "the same" list are two lists (PRD §9). Shape and content are
+    # unchanged - write_manifest calls this and embeds the result verbatim.
+    def source_provenance(build_id, http)
       pins = LicenseGate.load_pins
+      Sources::CATALOG.map do |src|
+        {
+          id: src[:id], url: src[:url], license: src[:license],
+          license_sha256: pins.dig(src[:id], "sha256"),
+          fetched_at: fetched_at_for(src[:id], http, build_id)
+        }
+      end
+    end
+
+    def write_manifest(build_id, compiled, crosscheck_stats, artifacts, http)
+      sources = source_provenance(build_id, http)
 
       files = %w[openasn-ipv4.bin openasn-ipv6.bin openasn-orgs.bin asn-categories.csv fetch-manifest.json ATTRIBUTION.md].map do |name|
         path = File.join(DIST_DIR, name)
@@ -96,14 +114,6 @@ module OpenASNPipeline
           sha256: Digest::SHA256.file(path).hexdigest,
           bytes: File.size(path),
           records: records_for(name, artifacts, path)
-        }
-      end
-
-      sources = Sources::CATALOG.map do |src|
-        {
-          id: src[:id], url: src[:url], license: src[:license],
-          license_sha256: pins.dig(src[:id], "sha256"),
-          fetched_at: fetched_at_for(src[:id], http, build_id)
         }
       end
 

@@ -104,6 +104,85 @@ Rake::TestTask.new("exports:test") do |t|
   t.test_files = FileList["test/export_*_test.rb"]
 end
 
+# Operator tooling for the portable exports. Neither task uploads anything,
+# neither takes a publication flag, and both work from files already on
+# disk: `exports:benchmark` reads a finished release directory (build/dist
+# or an unpacked snapshot) and writes its outputs somewhere else entirely,
+# `exports:validate` re-reads an assembled candidate.
+desc "Validate an assembled export candidate directory: rake 'exports:validate[build/work/export/<gen>]'"
+task "exports:validate", [:dir] do |_t, args|
+  require "json"
+  require_relative "pipeline/export/validate"
+  dir = args[:dir] or abort("usage: rake 'exports:validate[DIR]' (quote the brackets in zsh)")
+  present = ->(name) { File.file?(File.join(dir, name)) ? File.join(dir, name) : nil }
+
+  records  = present.call("records.jsonl") or abort("#{dir}: no records.jsonl to validate against")
+  metadata = present.call("metadata.json") or abort("#{dir}: no metadata.json")
+  report = OpenASNPipeline::Export::Validate.call(
+    records: records, metadata: metadata,
+    csv: present.call("openasn.csv"), csv_gz: present.call("openasn.csv.gz"),
+    sqlite: present.call("openasn.sqlite"), sqlite_gz: present.call("openasn.sqlite.gz")
+  )
+  puts JSON.pretty_generate(report)
+end
+
+desc "Size/time/memory for a full export: rake 'exports:benchmark[build/dist,build/work/export-bench]'. Never uploads."
+task "exports:benchmark", [:input, :output] do |_t, args|
+  require "json"
+  require_relative "pipeline/export/inputs"
+  require_relative "pipeline/export/metadata"
+  require_relative "pipeline/export/run"
+  require_relative "pipeline/export/sqlite"
+
+  input  = args[:input] or abort("usage: rake 'exports:benchmark[INPUT,OUTPUT]' (quote the brackets in zsh)")
+  output = args[:output] or abort("usage: rake 'exports:benchmark[INPUT,OUTPUT]'")
+  abort("#{output} already exists; the exporters refuse to overwrite a candidate") if File.exist?(output)
+
+  snapshot = OpenASNPipeline::Export::Inputs.load(
+    v4_path: File.join(input, "openasn-ipv4.bin"),
+    v6_path: File.join(input, "openasn-ipv6.bin"),
+    orgs_path: File.join(input, "openasn-orgs.bin")
+  )
+
+  # The source catalogue comes from the manifest that shipped WITH these
+  # bytes, not from a fresh construction: a benchmark must describe the
+  # snapshot it measured, and a local run has no fetch state to ask.
+  manifest_path = File.join(input, "manifest.json")
+  unless File.file?(manifest_path)
+    abort("#{input}: no manifest.json, so there is no honest source provenance for these inputs")
+  end
+  manifest = JSON.parse(File.read(manifest_path))
+  attribution = File.join(input, "ATTRIBUTION.md")
+
+  python = OpenASNPipeline::Export::Sqlite.interpreter
+  context = OpenASNPipeline::Export::Metadata.context(
+    snapshot: snapshot,
+    sources: manifest.fetch("sources"),
+    attribution: File.file?(attribution) ? File.read(attribution) : File.read(OpenASNPipeline::Env.attribution_path),
+    producer: OpenASNPipeline::Export::Metadata.producer_versions(python: python)
+  )
+
+  # Peak memory is deliberately NOT sampled from inside this process. Ruby's
+  # stdlib exposes no getrusage, and a sampling thread that shells out to
+  # `ps` fires SIGCHLD into the middle of zlib's GVL-released writes, which
+  # surfaced as a spurious Zlib::BufError during a 70MB compress. Measure it
+  # from outside instead:
+  #   /usr/bin/time -l bundle exec rake 'exports:benchmark[IN,OUT]'  (macOS)
+  #   /usr/bin/time -v bundle exec rake 'exports:benchmark[IN,OUT]'  (Linux)
+  started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  result = OpenASNPipeline::Export::Run.call(snapshot: snapshot, context: context, staging: output)
+  elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+  puts JSON.pretty_generate(
+    "input" => input,
+    "output" => output,
+    "elapsed_seconds" => elapsed.round(2),
+    "producer" => context.producer,
+    "records" => result.counts.to_h,
+    "outputs" => result.outputs.map(&:to_h)
+  )
+end
+
 desc "Remove build workspace (cache, work, dist)"
 task :clean do
   rm_rf "build"
