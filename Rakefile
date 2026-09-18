@@ -109,6 +109,28 @@ end
 # disk: `exports:benchmark` reads a finished release directory (build/dist
 # or an unpacked snapshot) and writes its outputs somewhere else entirely,
 # `exports:validate` re-reads an assembled candidate.
+desc "Reproduce the exports from an unpacked release: rake 'exports:from_release[INPUT,OUTPUT]'. Verifies, never uploads."
+task "exports:from_release", [:input, :output] do |_t, args|
+  require "json"
+  require_relative "pipeline/export/from_release"
+
+  input  = args[:input] or abort("usage: rake 'exports:from_release[INPUT,OUTPUT]' (quote the brackets in zsh)")
+  output = args[:output] or abort("usage: rake 'exports:from_release[INPUT,OUTPUT]'")
+  abort("#{output} already exists; the exporters refuse to overwrite a candidate") if File.exist?(output)
+
+  result = OpenASNPipeline::Export::FromRelease.call(input: input, output: output)
+  puts JSON.pretty_generate(
+    "build_id" => result.build_id,
+    "input" => result.input,
+    "output" => result.output,
+    "publishable" => false,
+    "nonpublishable_reasons" => result.nonpublishable_reasons,
+    "marker" => result.marker,
+    "records" => result.run.counts.to_h,
+    "outputs" => result.run.outputs.map(&:to_h)
+  )
+end
+
 desc "Validate an assembled export candidate directory: rake 'exports:validate[build/work/export/<gen>]'"
 task "exports:validate", [:dir] do |_t, args|
   require "json"

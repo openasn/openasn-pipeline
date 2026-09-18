@@ -82,6 +82,42 @@ module OpenASNPipeline
         )
       end
 
+      # Provenance for inputs that came out of a published archive rather
+      # than out of these checkouts. §10.2 permits `unknown` revisions only
+      # for exactly this case, only when publishing is disabled, and only
+      # when the build says why; inventing today's HEAD for bytes compiled
+      # last week would be a provenance claim that is simply false.
+      # `working_tree_dirty` is true because the honest answer is unknown
+      # and true is the answer a publisher refuses.
+      def archive_context(snapshot:, sources:, attribution:, producer: producer_versions)
+        if ENV["PUBLISH"] == "1"
+          Env.fail_stage!("archive provenance cannot be published: the inputs did not come from a checkout, " \
+                          "so there is no revision to record")
+        end
+        build_id = Time.at(snapshot.build_ts).utc.iso8601
+        Env.warn("export metadata: inputs are archived release bytes (build #{build_id}), so both repository " \
+                 "revisions are recorded as #{UNKNOWN} and the tree as dirty. This build must not be published.")
+
+        Context.new(build_id: build_id, build_unix_ts: snapshot.build_ts, sources: sources,
+                    attribution: attribution, producer: producer,
+                    data_repo_commit: UNKNOWN, pipeline_repo_commit: UNKNOWN, working_tree_dirty: true)
+      end
+
+      # Why a publisher must refuse this metadata, or [] if it may proceed.
+      # Kept here, beside the keys it reads, so the export stage and the
+      # publisher cannot disagree about what "provenance good enough to
+      # release" means.
+      def nonpublishable_reasons(meta)
+        reasons = []
+        %w[data_repo_commit pipeline_repo_commit].each do |key|
+          value = meta[key]
+          reasons << "#{key} is #{UNKNOWN}" if value == UNKNOWN
+          reasons << "#{key} is not a full commit id" unless value.is_a?(String) && value.match?(/\A([0-9a-f]{40}|#{UNKNOWN})\z/)
+        end
+        reasons << "working_tree_dirty is true" if meta["working_tree_dirty"] == "true"
+        reasons.uniq
+      end
+
       # snapshot: Export::Inputs::Snapshot, counts: Export::Spool::Counts.
       def build(snapshot:, counts:, context:)
         meta = {
