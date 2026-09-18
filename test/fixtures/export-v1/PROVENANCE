@@ -1,0 +1,20 @@
+Contract fixtures for the portable exports (schema 1, profile core-v1).
+
+profile-fixtures.json   sha256 60b656860403fa98ca4b767f0c10fdfb81f5d704cfe69a20db9d78d64ab81ca7
+projection-fixture.json sha256 3054cd56ff055f78211d235f98e188696e61c63fe4034e381aacebdb51bd79f8
+
+Both are vendored BYTE-FOR-BYTE from the portable-exports PRD (v1.0,
+2026-09-18), where they are hand-specified alongside the §7 precedence
+table and the §8.2 sweep. They ship to the data repo's
+conformance/exports/v1/ as the public contract; this copy is the pipeline's
+tested source of the same expectations.
+
+Hand-specified is the whole point: every expected verdict, source list and
+interval bound here was written by reading the spec, never by running
+Export::Profile or Export::Project and recording what came out. Regenerating
+them from the code under test would turn the acceptance oracle into a
+snapshot of the current bug. If a fixture and the implementation disagree,
+the implementation is wrong until the spec says otherwise.
+
+projection-fixture.json expresses addresses as offsets from 1.0.0.0; the
+tests add that origin before feeding the layers to the sweep.

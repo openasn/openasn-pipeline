@@ -95,6 +95,15 @@ Rake::TestTask.new(:test) do |t|
   t.test_files = FileList["test/**/*_test.rb"]
 end
 
+# The export suite is a subset of `rake test`, not a replacement: it is the
+# fast loop while iterating on the projection/profile. Synthetic fixtures
+# only - no data repo, no cache, no network.
+Rake::TestTask.new("exports:test") do |t|
+  t.description = "Export unit tests only (offline, synthetic fixtures)"
+  t.libs << "pipeline"
+  t.test_files = FileList["test/export_*_test.rb"]
+end
+
 desc "Remove build workspace (cache, work, dist)"
 task :clean do
   rm_rf "build"
