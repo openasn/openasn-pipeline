@@ -7,3 +7,6 @@
 /vendor/bundle/
 /coverage/
 *.gem
+# `go build ./...` inside tools/mmdbwriter drops the binary next to its source;
+# the tool is compiled into build/work/ by `rake exports:mmdb_test`.
+/tools/mmdbwriter/mmdbwriter

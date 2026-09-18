@@ -116,3 +116,18 @@ task "gates:status" do
   require_relative "pipeline/tools/gates_status"
   exit(1) unless OpenASNPipeline::GatesStatus.call
 end
+
+# --- MMDB writer (build-only Go toolchain) ---------------------------------
+# Deliberately outside `test` and `exports:test`: those must run anywhere, and
+# the Ruby MMDB suite skips loudly when `go` is missing. This task is the one
+# place that refuses to skip, so CI proves the writer rather than stepping
+# over it. Go is a BUILD dependency; nothing shipped to a consumer needs it.
+desc "MMDB writer: build/vet/test the Go tool, then run the Ruby MMDB acceptance suite"
+task "exports:mmdb_test" do
+  tool = File.expand_path("build/work/export-mmdb-tool/openasn-mmdb", __dir__)
+  mkdir_p File.dirname(tool)
+  sh "go -C tools/mmdbwriter build -o #{tool} ."
+  sh "go -C tools/mmdbwriter vet ./..."
+  sh "go -C tools/mmdbwriter test ./..."
+  ruby "-Ipipeline test/export_mmdb_test.rb"
+end

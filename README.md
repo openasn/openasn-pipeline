@@ -58,6 +58,55 @@ rake licenses:check              # verify upstream license pins without building
 
 Requirements: Ruby ≥ 3.2, `jq` recommended (streams the ~69MB ipverse JSON; a stdlib fallback exists but is memory-hungry), `gh` CLI for publishing.
 
+### The MMDB writer (build-only Go toolchain)
+
+`tools/mmdbwriter/` is a small Go module that turns the export spool into
+`openasn.mmdb`. It is a **build** dependency: no consumer needs Go, existing
+native clients are untouched, and the tool has no HTTP client and no file
+discovery — every input arrives as an explicit path.
+
+Pinned in `go.mod` / `go.sum` and exercised by CI:
+
+| Dependency | Version | Role |
+|---|---|---|
+| Go toolchain | `1.24.0` | `go` directive in `go.mod` |
+| `github.com/maxmind/mmdbwriter` | `v1.2.0` | writer |
+| `github.com/oschwald/maxminddb-golang/v2` | `v2.1.1` | **independent** reader used by `verify` |
+| `go4.org/netipx` | `v0.0.0-20231129151722-fdeea329fbba` | indirect (exact range → prefixes) |
+| `golang.org/x/sys` | `v0.38.0` | indirect |
+
+The reader is a different codebase from the writer on purpose: a writer
+validating its own output with its own reader is one codebase agreeing with
+itself, and the point of shipping MMDB is that a stranger's reader can open
+the file.
+
+```bash
+go -C tools/mmdbwriter build -o ../../build/work/openasn-mmdb .
+
+build/work/openasn-mmdb build  --records build/work/export/<gen>/records.jsonl \
+                               --metadata build/work/export/<gen>/metadata.json \
+                               --output  build/work/export/<gen>/openasn.mmdb
+build/work/openasn-mmdb verify --database build/work/export/<gen>/openasn.mmdb \
+                               --records build/work/export/<gen>/records.jsonl \
+                               --metadata build/work/export/<gen>/metadata.json
+
+rake exports:mmdb_test   # build + vet + Go unit tests + the Ruby MMDB suite
+```
+
+Both modes exit 0 only on full success and print a structured JSON summary on
+stdout, with diagnostics on stderr. `verify` runs the independent reader's
+structural check, validates the standard metadata, compares the decoded
+payload at every interval start and end plus an interior, probes both sides of
+every gap, and walks the whole tree to prove the stored prefixes tile the
+spool's intervals exactly — which is what catches a widened CIDR or a phantom
+alias that a lookup alone would never see.
+
+Two hard gates live in `build` (see `EXPORT_FORMATS.md` §6.4). A combined MMDB
+stores IPv4 inside `::/96`, so native IPv6 data overlapping `::/96` or the
+mapped prefix `::ffff:0:0/96` would collide with it. Either one fails the
+build loudly; the counts are logged on every run so a future violation is
+visible before it fails a nightly (both are 0 on the 2026-09-18 snapshot).
+
 ## Enrichment tooling (operator-run, never part of the build)
 
 `pipeline/enrich/` is an LLM-assisted **curation aid**: it drafts ASN
