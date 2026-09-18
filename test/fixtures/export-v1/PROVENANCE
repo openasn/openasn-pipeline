@@ -1,13 +1,22 @@
 Contract fixtures for the portable exports (schema 1, profile core-v1).
 
-profile-fixtures.json   sha256 60b656860403fa98ca4b767f0c10fdfb81f5d704cfe69a20db9d78d64ab81ca7
+profile-fixtures.json   sha256 e5820aec842b2e8fb59d3c5fdca2ab92ae120039a4a936796a9ca37d64717876
 projection-fixture.json sha256 3054cd56ff055f78211d235f98e188696e61c63fe4034e381aacebdb51bd79f8
 
-Both are vendored BYTE-FOR-BYTE from the portable-exports PRD (v1.0,
-2026-09-18), where they are hand-specified alongside the §7 precedence
-table and the §8.2 sweep. They ship to the data repo's
-conformance/exports/v1/ as the public contract; this copy is the pipeline's
-tested source of the same expectations.
+Both are vendored BYTE-FOR-BYTE from the data repo's public contract at
+conformance/exports/v1/, which is the source of truth. They originate in
+the portable-exports PRD (v1.0, 2026-09-18), hand-specified alongside the
+precedence table and the sweep; this copy is the pipeline's tested source
+of the same expectations, and the two must never diverge.
+
+profile-fixtures.json carries three cases added after the first vendoring,
+because the published contract singles out "an ISP with any role other
+than tier1_transit, INCLUDING A NULL ROLE, is residential_isp" and had no
+case for the null role it highlights. isp-null-role closes that gap;
+hosting-content-network and business-stub were added at the same time so
+that every network_role name in the vocabulary appears in the public
+conformance suite at least once, which the CSV and SQLite column
+round-trips need.
 
 Hand-specified is the whole point: every expected verdict, source list and
 interval bound here was written by reading the spec, never by running
