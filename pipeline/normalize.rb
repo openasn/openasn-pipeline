@@ -24,8 +24,8 @@ module OpenASNPipeline
 
     def run(paths)
       out = {}
-      # :backbone_v4/_v6 are sapics' origin-asn files, or rib2origin's output in
-      # the same shape when OPENASN_BACKBONE=routeviews (fetch.rb).
+      # :backbone_v4/_v6 are rib2origin's output (RouteViews, default) or, with
+      # OPENASN_BACKBONE=sapics, sapics' origin-asn files in the same shape (fetch.rb).
       out[:base_v4] = parse_origin_asn(paths[:backbone_v4], IPMath::V4_MAX, "origin-asn ipv4")
       out[:base_v6] = parse_origin_asn(paths[:backbone_v6], IPMath::V6_MAX, "origin-asn ipv6")
 

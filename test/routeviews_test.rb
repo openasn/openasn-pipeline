@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
-# The RouteViews backbone switch (OPENASN_BACKBONE=routeviews, CD-5
-# prototype). The derivation itself is tested in Go (tools/rib2origin);
+# The RouteViews backbone switch (default since D-SRC-2 (backbone); legacy sapics via
+# OPENASN_BACKBONE=sapics). The derivation itself is tested in Go (tools/rib2origin);
 # these cover the Ruby wiring: URLs, slot choice, and that licence pins and
 # manifest sources follow the backbone actually compiled from.
 
@@ -20,12 +20,21 @@ module OpenASNPipeline
       old.each { |k, v| ENV[k] = v }
     end
 
-    def test_default_backbone_is_sapics_and_unchanged
-      with_env("OPENASN_BACKBONE" => nil) do
-        assert_equal "sapics", Sources.backbone
-        assert_same Sources::LICENSE_URLS, Sources.license_urls
-        assert_same Sources::CATALOG, Sources.catalog
+    def test_default_backbone_is_routeviews
+      [nil, "", " "].each do |unset|
+        with_env("OPENASN_BACKBONE" => unset) do
+          assert_equal "routeviews", Sources.backbone
+          assert_same Sources::LICENSE_URLS, Sources.license_urls
+          assert_same Sources::CATALOG, Sources.catalog
+        end
       end
+      # The default pins and sources carry RouteViews and never sapics: the
+      # pins file is written from these (rake licenses:pin).
+      refute Sources::LICENSE_URLS.key?("sapics-origin-asn")
+      assert_equal :wp_json_rendered_text, Sources::LICENSE_URLS.fetch("routeviews")[:extract]
+      ids = Sources::CATALOG.map { |s| s[:id] }
+      assert_includes ids, "routeviews"
+      refute_includes ids, "sapics-origin-asn"
     end
 
     def test_unknown_backbone_fails_loudly
@@ -34,13 +43,16 @@ module OpenASNPipeline
       end
     end
 
-    def test_routeviews_swaps_pins_and_catalog
-      with_env("OPENASN_BACKBONE" => "routeviews") do
-        refute Sources.license_urls.key?("sapics-origin-asn")
-        assert_equal :wp_json_rendered_text, Sources.license_urls.fetch("routeviews")[:extract]
+    def test_legacy_sapics_backbone_swaps_pins_and_catalog_back
+      with_env("OPENASN_BACKBONE" => "sapics") do
+        refute Sources.routeviews?
+        refute Sources.license_urls.key?("routeviews")
+        assert_equal :whole_file, Sources.license_urls.fetch("sapics-origin-asn")[:extract]
         ids = Sources.catalog.map { |s| s[:id] }
-        refute_includes ids, "sapics-origin-asn"
-        assert_includes ids, "routeviews"
+        refute_includes ids, "routeviews"
+        assert_equal "sapics-origin-asn", ids.first
+        # Every other source is identical under either backbone.
+        assert_equal Sources::LICENSE_URLS.keys - ["routeviews"], Sources.license_urls.keys - ["sapics-origin-asn"]
       end
     end
 

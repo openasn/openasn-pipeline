@@ -36,9 +36,9 @@ module OpenASNPipeline
       Env.prepare_dirs!
       paths = {}
 
-      # The IP->ASN backbone: sapics (default) or, behind
-      # OPENASN_BACKBONE=routeviews, our own derivation from RouteViews RIBs
-      # (lib/routeviews.rb). Either way normalize.rb reads :backbone_v4/_v6.
+      # The IP->ASN backbone: our own derivation from RouteViews RIBs
+      # (lib/routeviews.rb; the default) or, with OPENASN_BACKBONE=sapics, the
+      # legacy sapics files. Either way normalize.rb reads :backbone_v4/_v6.
       if Sources.routeviews?
         paths.merge!(RouteViews.build(http: http, offline: offline))
       else

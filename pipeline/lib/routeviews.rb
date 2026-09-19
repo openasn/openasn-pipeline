@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
-# The RouteViews backbone (OPENASN_BACKBONE=routeviews; prototype, CD-5):
+# The RouteViews backbone (the default since D-SRC-2 (backbone) / CD-12; the legacy
+# sapics backbone remains behind OPENASN_BACKBONE=sapics):
 #
 #   fetch one RIB per collector (same 2-hourly slot) -> tools/rib2origin
 #   -> origin-asn-ipv{4,6}-num.csv in sapics' exact shape -> normalize.rb

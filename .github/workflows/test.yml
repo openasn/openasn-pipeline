@@ -22,3 +22,13 @@ jobs:
 
       - name: Run unit tests
         run: bundle exec rake test
+
+      # tools/rib2origin (the RouteViews backbone deriver) is Go, stdlib
+      # only; the Ruby tests above cover the wiring, these the derivation.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: tools/rib2origin/go.mod
+          cache: false # stdlib only: no modules to cache
+
+      - name: Run rib2origin tests
+        run: go -C tools/rib2origin vet ./... && go -C tools/rib2origin test ./...

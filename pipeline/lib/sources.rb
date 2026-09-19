@@ -17,11 +17,23 @@ require_relative "http"
 
 module OpenASNPipeline
   module Sources
-    # --- sapics/ip-location-db (origin-asn): the IP->ASN backbone ------------
-    # PDDL v1.0 ("free use without attribution", per their README license
-    # section). Compiled by sapics from RIR delegated stats + RouteViews/RIPE
-    # RIS BGP data, deliberately avoiding RIR WHOIS - the same licensing
-    # discipline this project needs.
+    # --- sapics/ip-location-db (origin-asn): LEGACY backbone ------------------
+    # RETIRED as the default by D-SRC-2 (backbone) (coordinator ruling CD-12,
+    # 2026-09-19); still selectable with OPENASN_BACKBONE=sapics so the
+    # switchover can be rolled back without a code change. Removable in a
+    # follow-up once the RouteViews backbone has published cleanly for a few
+    # weeks: delete these constants, SAPICS_LICENSE/SAPICS_CATALOG,
+    # resolve_sapics_urls, the sapics branch of fetch.rb and publish.rb's
+    # "sapics-origin-asn" fetch keys.
+    #
+    # Why retired: sapics labels its table PDDL v1.0, but it is compiled from
+    # RouteViews + RIPE RIS BGP data and fills unrouted space from RIR
+    # delegated stats (P4-L audit; P4-B measured 10.8% of its v4 and 59.8%
+    # of its v6 space as RIR-stats fill). An aggregator's relabel is not a
+    # grant from the authority, so it fails README "Legal design" rule 1.
+    # Its licence pin is dropped from data/licenses/pins.json, so a sapics
+    # build FAILS the licence gate ("no pin recorded") until someone re-pins
+    # it in a reviewed PR - rolling back is a deliberate act.
     #
     # GOTCHA (2026-06-18): sapics changed their release URL scheme once
     # already. We therefore RESOLVE the asset URLs from their README table at
@@ -35,9 +47,10 @@ module OpenASNPipeline
     }.freeze
 
     # --- RouteViews (University of Oregon): raw BGP RIBs -> our own backbone --
-    # PROTOTYPE behind OPENASN_BACKBONE=routeviews (data-repo coordinator
-    # decision CD-5, 2026-09-19; proposal D-SRC-2). Default stays sapics
-    # until the replacement is proven equivalent and the owner merges.
+    # THE DEFAULT IP->ASN backbone (data-repo DECISIONS.md D-SRC-2 (backbone);
+    # coordinator rulings CD-5 and CD-12, 2026-09-19). Measured against
+    # sapics on the same day: origin agreement 98.94% v4 / 97.45% v6 where
+    # both cover, compiled verdicts 99.81% identical, spot panel green.
     #
     # Why: sapics origin-asn is itself compiled from RouteViews + RIPE RIS
     # (+ RIR stats for unrouted space) and relabelled PDDL, so it fails the
@@ -74,7 +87,10 @@ module OpenASNPipeline
     # on repeated fetches, 2026-09-19). Text is tag-stripped before hashing.
     ROUTEVIEWS_LICENSE_URL = "https://www.routeviews.org/routeviews/wp-json/wp/v2/pages/45927?_fields=content"
 
-    BACKBONES = %w[sapics routeviews].freeze
+    # First entry is the default (OPENASN_BACKBONE unset or empty).
+    BACKBONES = %w[routeviews sapics].freeze
+    ROUTEVIEWS_LICENSE = { url: ROUTEVIEWS_LICENSE_URL, extract: :wp_json_rendered_text }.freeze
+    ROUTEVIEWS_CATALOG = { id: "routeviews", url: "https://www.routeviews.org/", license: "CC-BY-4.0" }.freeze
 
     # --- ipverse/as-metadata: ASN -> description/country/category/role -------
     # CC0 1.0 (LICENSE pinned below). The `category`/`networkRole` fields
@@ -120,19 +136,19 @@ module OpenASNPipeline
     # (MaxMind Dec 2019). Expected hashes live in data/licenses/pins.json;
     # human-readable copies in data/licenses/*.txt.
     #
-    # Two sources have no standalone LICENSE file (verified 2026-07-04):
-    #   * sapics: license is declared in origin-asn/SOURCES.md (first line is
-    #     the PDDL statement) - we pin that whole file.
+    # Three sources have no standalone LICENSE file:
+    #   * RouteViews: the terms are a WordPress page; we pin the tag-stripped
+    #     text of its JSON rendering (ROUTEVIEWS_LICENSE_URL, 2026-09-19).
+    #   * sapics (LEGACY, OPENASN_BACKBONE=sapics only - see license_urls):
+    #     license is declared in origin-asn/SOURCES.md (first line is the
+    #     PDDL statement) - we pin that whole file (verified 2026-07-04).
     #   * X4BNet: MIT lives in README.md under a "# License" heading, with the
     #     load-bearing sentence extending it to "the list itself (source files
     #     and generated output)". We pin just that extracted section so
     #     unrelated README churn (stats, docs) doesn't trip the gate, but any
     #     edit to the grant itself does. Extraction: license_gate.rb.
     LICENSE_URLS = {
-      "sapics-origin-asn" => {
-        url: "https://raw.githubusercontent.com/sapics/ip-location-db/main/origin-asn/SOURCES.md",
-        extract: :whole_file
-      },
+      "routeviews" => ROUTEVIEWS_LICENSE,
       "ipverse-as-metadata" => {
         url: "https://raw.githubusercontent.com/ipverse/as-metadata/master/LICENSE",
         extract: :whole_file
@@ -150,24 +166,31 @@ module OpenASNPipeline
         extract: :whole_file
       }
     }.freeze
+    SAPICS_LICENSE = {
+      url: "https://raw.githubusercontent.com/sapics/ip-location-db/main/origin-asn/SOURCES.md",
+      extract: :whole_file
+    }.freeze
 
     # Metadata that ends up in manifest.json's `sources` array so every
     # artifact is self-describing about provenance.
     CATALOG = [
-      { id: "sapics-origin-asn",     url: "https://github.com/sapics/ip-location-db", license: "PDDL-1.0" },
+      ROUTEVIEWS_CATALOG,
       { id: "ipverse-as-metadata",   url: "https://github.com/ipverse/as-metadata",   license: "CC0-1.0" },
       { id: "ipverse-as-ip-blocks",  url: "https://github.com/ipverse/as-ip-blocks",  license: "CC0-1.0" },
       { id: "x4bnet-lists_vpn",      url: "https://github.com/X4BNet/lists_vpn",      license: "MIT" },
       { id: "brianhama-bad-asn-list", url: "https://github.com/brianhama/bad-asn-list", license: "MIT" },
       { id: "openasn-overrides",     url: "https://github.com/openasn/openasn",       license: "CC0-1.0" }
     ].freeze
+    SAPICS_CATALOG = { id: "sapics-origin-asn", url: "https://github.com/sapics/ip-location-db", license: "PDDL-1.0" }.freeze
 
     module_function
 
-    # Which IP->ASN backbone this build compiles from. sapics is the default
-    # until D-SRC-2 is decided; anything unknown fails loudly.
+    # Which IP->ASN backbone this build compiles from: RouteViews unless
+    # OPENASN_BACKBONE=sapics (legacy, see above); anything unknown fails
+    # loudly.
     def backbone
-      b = ENV.fetch("OPENASN_BACKBONE", "sapics")
+      b = ENV.fetch("OPENASN_BACKBONE", "").strip
+      b = BACKBONES.first if b.empty?
       Env.fail_stage!("OPENASN_BACKBONE=#{b.inspect} - expected one of #{BACKBONES.join(', ')}") unless BACKBONES.include?(b)
       b
     end
@@ -177,18 +200,16 @@ module OpenASNPipeline
     # Licence-gate targets for THIS build: the backbone we do not compile
     # from is not pinned (its terms no longer reach the artifact).
     def license_urls
-      return LICENSE_URLS unless routeviews?
+      return LICENSE_URLS if routeviews?
 
-      LICENSE_URLS.reject { |id, _| id == "sapics-origin-asn" }
-                  .merge("routeviews" => { url: ROUTEVIEWS_LICENSE_URL, extract: :wp_json_rendered_text })
+      { "sapics-origin-asn" => SAPICS_LICENSE }.merge(LICENSE_URLS.reject { |id, _| id == "routeviews" })
     end
 
     # manifest.json `sources` for THIS build.
     def catalog
-      return CATALOG unless routeviews?
+      return CATALOG if routeviews?
 
-      CATALOG.reject { |s| s[:id] == "sapics-origin-asn" } +
-        [{ id: "routeviews", url: "https://www.routeviews.org/", license: "CC-BY-4.0" }]
+      [SAPICS_CATALOG] + CATALOG.reject { |s| s[:id] == "routeviews" }
     end
 
     # RouteViews RIB URL for one collector and a slot "YYYYMMDD.HHMM" (UTC).
