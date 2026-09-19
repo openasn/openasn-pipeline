@@ -84,6 +84,24 @@ module OpenASNPipeline
         "region" => { "value" => "http://www.wikidata.org/entity/#{region_qid}" } }
     end
 
+    # CD-19b: ISO 3166-1 gives Hong Kong and Macau their own codes; Wikidata's
+    # P17 for their companies is the PRC. Shapes as returned 2026-09-19
+    # (Q5099786 China Mobile Hong Kong, Q15899929 China Telecom (Macau)).
+    def test_hong_kong_and_macau_refine_cn_but_never_rewrite_another_country
+      items, stats = WikidataCountries.parse(json(
+        b("Q5099786", "P17", "CN"), b("Q5099786", "P159", "CN"), region("Q5099786", "Q8646"),
+        b("Q15899929", "P17", "CN"), region("Q15899929", "Q14773"),
+        b("Q7575433", "P17", "US"), b("Q7575433", "P159", "CN"), region("Q7575433", "Q8646"), # stale HK HQ
+        region("Q77", "Q8646") # located in HK, no P17/P159 country of its own
+      ))
+      assert_equal({ "cc" => "HK", "via" => "region" }, items["Q5099786"])
+      assert_equal({ "cc" => "MO", "via" => "region" }, items["Q15899929"])
+      assert_equal({ "cc" => "US", "via" => "P17" }, items["Q7575433"])
+      assert_equal({ "cc" => "HK", "via" => "region" }, items["Q77"])
+      assert_equal 3, stats["sar"]
+      assert_equal 5, stats["statements"], "region rows are not country statements"
+    end
+
     # CD-19a: an item located in an occupied / breakaway territory publishes
     # the recognised state, never the de facto controller's code; any third
     # country makes it ambiguous. Q-numbers of the items are made up; the
@@ -110,9 +128,10 @@ module OpenASNPipeline
     def test_the_query_asks_for_every_region_and_every_region_maps_to_a_state
       WikidataCountries::REGIONS.each do |qid, cc|
         assert_includes WikidataCountries::QUERY, "wd:#{qid} "[0..-2]
-        assert Countries::TERRITORY_STATES.value?(cc), "#{qid} -> #{cc}"
+        assert(WikidataCountries::SAR_CODES.include?(cc) || Countries::TERRITORY_STATES.value?(cc), "#{qid} -> #{cc}")
       end
-      assert_equal Countries::TERRITORY_STATES.values.uniq.sort, WikidataCountries::REGIONS.values.uniq.sort
+      assert_equal Countries::TERRITORY_STATES.values.uniq.sort,
+                   (WikidataCountries::REGIONS.values.uniq - WikidataCountries::SAR_CODES).sort
     end
 
     def test_error_pages_raise_instead_of_publishing_nothing

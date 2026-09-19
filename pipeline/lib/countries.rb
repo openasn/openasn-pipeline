@@ -12,7 +12,7 @@
 #      Wikidata fallback (a Wikidata value we checked and found wrong, or a
 #      group item linked to a subsidiary's ASN we cannot place).
 #   2. Wikidata: P17 (else P159 -> P17) of the ASN's admitted P3797 item,
-#      refined for occupied territories
+#      refined for Hong Kong / Macau and occupied territories
 #      (lib/wikidata_countries.rb)
 # An ASN with neither has an empty country. That is an honest blank, never a
 # guess. Nothing from ipverse's countryCode may reach the CSV; the tripwire is

@@ -34,8 +34,14 @@
 # restricted-reference rule is kept anyway, so a future bulk import from a
 # registry cannot enter silently.
 #
-# REGIONS: the query also returns whether the item's HQ (P159) or location
-# (P131) lies, through P131*, in one of REGIONS:
+# REGIONS: ISO 3166-1 is finer than Wikidata's P17 in two places, and the
+# query also returns whether the item's HQ (P159) or location (P131) lies,
+# through P131*, in one of REGIONS:
+#   * Hong Kong / Macau (CD-19b): Wikidata's P17 for an HK/MO company is the
+#     People's Republic of China (CN); ISO 3166-1 gives HK and MO their own
+#     codes. An item located in HK/MO whose own result is CN (or nothing)
+#     publishes HK/MO. Any other result stands (an item with a stale HK
+#     headquarters and a newer non-CN country is not rewritten).
 #   * Occupied and breakaway territories (CD-19a; Countries::TERRITORY_STATES):
 #     an item located in Crimea, Sevastopol, the Donetsk/Luhansk/Zaporizhzhia/
 #     Kherson oblasts (or the Russian-declared entities there), Abkhazia,
@@ -44,8 +50,9 @@
 #     controller (Countries::DE_FACTO_CONTROLLERS) or nothing; any other
 #     result makes it ambiguous and it publishes nothing. So Wikidata can
 #     never put RU on a Crimean operator, whatever its P17 says.
-# Measured 2026-09-19: no admitted item sits in a territory. The rule is a
-# guard; asn_country.txt's `territory:` tags carry the operators we know about.
+# Measured 2026-09-19: 4 admitted items hit a region (3 HK, 1 MO); none sits
+# in a territory. The territory rule is a guard, and asn_country.txt's
+# `territory:` tags carry the operators we know about.
 #
 # SEMANTICS. The value means "the country the ASN's operator is based in"
 # (seat or headquarters). That is close to, but not the same as, a registry
@@ -66,6 +73,8 @@ module OpenASNPipeline
     # Region QID -> published ISO code. Every QID was checked by label on
     # 2026-09-19 (wbgetentities / rdfs:label SPARQL); never add one from memory.
     REGIONS = {
+      "Q8646" => "HK",       # Hong Kong
+      "Q14773" => "MO",      # Macau
       "Q7835" => "UA",       # Crimea (peninsula)
       "Q756294" => "UA",     # Autonomous Republic of Crimea
       "Q15966495" => "UA",   # Republic of Crimea (Russian-declared)
@@ -90,6 +99,7 @@ module OpenASNPipeline
       "Q648767" => "MD",     # Administrative-Territorial Units of the Left Bank of the Dniester
       "Q23681" => "CY"       # Northern Cyprus
     }.freeze
+    SAR_CODES = %w[HK MO].freeze
 
     QUERY = <<~SPARQL
       SELECT ?item ?via ?cc ?rank ?end ?region
@@ -205,14 +215,20 @@ module OpenASNPipeline
       regions.each do |qid, codes|
         codes = codes.uniq
         base = out[qid] && out[qid]["cc"]
-        state = codes.first
-        allowed = [nil, state, *Countries::DE_FACTO_CONTROLLERS.fetch(state, [])]
-        if codes.size == 1 && allowed.include?(base)
-          out[qid] = { "cc" => state, "via" => "territory" }
-          stats["territory"] += 1
-        else
-          out.delete(qid)
-          stats["ambiguous_territory"] += 1
+        states = codes - SAR_CODES
+        if states.any?
+          state = states.first
+          allowed = [nil, state, *Countries::DE_FACTO_CONTROLLERS.fetch(state, [])]
+          if states.size == 1 && allowed.include?(base)
+            out[qid] = { "cc" => state, "via" => "territory" }
+            stats["territory"] += 1
+          else
+            out.delete(qid)
+            stats["ambiguous_territory"] += 1
+          end
+        elsif codes.size == 1 && [nil, "CN"].include?(base)
+          out[qid] = { "cc" => codes.first, "via" => "region" }
+          stats["sar"] += 1
         end
       end
     end

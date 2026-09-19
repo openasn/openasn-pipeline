@@ -128,7 +128,7 @@ def parse_wikidata_countries(path)
   items, stats = WikidataCountries.parse(File.read(path))
   dropped = stats.except("statements", "items_with_country", "sar", "territory").map { |k, v| "#{k}=#{v}" }.join(", ")
   Env.log("wikidata P17/P159: #{stats['statements']} statements -> #{items.size} items with one country " \
-          "(territory -> recognised state: #{stats['territory'].to_i}; dropped: #{dropped})")
+          "(HK/MO refined: #{stats['sar'].to_i}, territory -> recognised state: #{stats['territory'].to_i}; dropped: #{dropped})")
   [items, stats]
 rescue JSON::ParserError, ArgumentError => e
   Env.fail_stage!("wikidata P17/P159: unparseable response (#{e.message}) - did the endpoint return an error page?")
