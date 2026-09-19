@@ -15,11 +15,17 @@ task :fetch do
   ruby "pipeline/fetch.rb"
 end
 
-desc "Re-pin upstream license SHA-256 hashes (ONLY inside a reviewed PR explaining why)"
+desc "Re-pin upstream license SHA-256 hashes (ONLY inside a reviewed PR explaining why; ONLY=id1,id2 pins just those)"
 task "licenses:pin" do
   require_relative "pipeline/lib/http"
   require_relative "pipeline/lib/license_gate"
-  OpenASNPipeline::LicenseGate.pin!
+  only = ENV["ONLY"].to_s.split(",").map(&:strip).reject(&:empty?)
+  OpenASNPipeline::LicenseGate.pin!(only: only.empty? ? nil : only)
+end
+
+desc "Draft data/overrides/org_names.txt lines from enrichment dossiers: rake 'org_names:draft[a.jsonl b.jsonl]'"
+task "org_names:draft", [:paths] do |_t, args|
+  ruby "pipeline/tools/org_names_from_dossiers.rb", *args[:paths].to_s.split(/[\s,]+/)
 end
 
 desc "Verify upstream licenses against pinned hashes without building"

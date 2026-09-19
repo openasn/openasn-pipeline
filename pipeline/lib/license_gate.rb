@@ -57,13 +57,24 @@ module OpenASNPipeline
       Env.fail_stage!("LICENSE GATE FAILED:\n  - #{failures.join("\n  - ")}") if failures.any?
     end
 
-    # Re-pin all sources to whatever is live right now, and store the full
+    # Re-pin sources to whatever is live right now, and store the full
     # human-readable text alongside. Only ever run this deliberately, inside
     # a reviewed PR that states why the license text changed.
-    def pin!(http: Http.new)
+    #
+    # only: source ids to (re-)pin (`rake licenses:pin ONLY=a,b`); every other
+    # existing pin and its .txt copy stays byte-for-byte untouched. Use it when
+    # ADDING a source, so the review is not asked to re-approve pins nobody
+    # re-read. nil (the default) re-pins everything, as before.
+    def pin!(http: Http.new, only: nil)
+      if only
+        unknown = only - Sources::LICENSE_URLS.keys
+        raise ArgumentError, "licenses:pin ONLY= names unknown source ids: #{unknown.join(', ')}" if unknown.any?
+      end
       FileUtils.mkdir_p(Env.licenses_dir)
-      pins = {}
+      pins = only ? load_pins : {}
       Sources::LICENSE_URLS.each do |source_id, spec|
+        next if only && !only.include?(source_id)
+
         text = extract(http.get!(spec[:url]), spec[:extract], source_id)
         pins[source_id] = {
           "url" => spec[:url],
@@ -98,6 +109,15 @@ module OpenASNPipeline
         Env.fail_stage!("#{source_id}: could not extract License section - README structure changed, INVESTIGATE") unless m
 
         "# License#{m[1]}"
+      when :wikidata_cc0
+        # Wikidata:Copyright (raw wikitext) opens with the one sentence that
+        # grants CC0 on structured data. Pin that line alone, so edits
+        # elsewhere on the policy page cannot trip the gate but any edit to the
+        # grant does.
+        line = body.each_line.find { |l| l.start_with?("All structured data from the main") }
+        Env.fail_stage!("#{source_id}: could not find the CC0 grant sentence - Wikidata:Copyright changed, INVESTIGATE") unless line
+
+        line.chomp
       else
         Env.fail_stage!("unknown license extract mode #{mode.inspect} for #{source_id}")
       end

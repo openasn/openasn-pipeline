@@ -3,7 +3,7 @@
 # openasn-orgs.bin - the ASN -> organization-name sidecar artifact.
 #
 # WHY A SEPARATE FILE: the main artifacts stay lean (they're bundled as the
-# gem's seed, budget-capped), while org names (~3MB) are optional richness
+# gem's seed, budget-capped), while org names are optional richness
 # that clients download on their first data refresh. A lookup works fully
 # without this file - Result#as_org just returns nil until it's present.
 #
@@ -18,8 +18,19 @@
 #   blob:  concatenated UTF-8 names; entry length = next offset - own offset
 #          (last entry runs to blob_size). No per-entry length prefix needed.
 #
-# Names are the ipverse as-metadata descriptions, truncated to MAX_NAME
-# bytes on a valid UTF-8 boundary.
+# WHERE THE NAMES COME FROM (data-repo DECISIONS.md D-SRC-2, org names;
+# byte layout unchanged, still OORG v1). Precedence, first hit wins:
+#   1. data/overrides/org_names.txt: our own curated, sourced names (CC0)
+#   2. Wikidata P3797 item labels (CC0), admissible statements only
+#      (lib/wikidata_names.rb)
+# ASNs with neither get no entry, and clients see as_org == nil. Until
+# 2026-09 this file carried the ipverse as-metadata descriptions (~125k
+# names), which are bulk RIR WHOIS `descr`. Those left the CC0 core. They
+# are now a Tier B recipe (`ipverse_org_names` in fetch-manifest.json) that
+# clients fetch themselves. Nothing from ipverse's `description` may reach
+# write(); test/org_names_test.rb guards that.
+#
+# Names are truncated to MAX_NAME bytes on a valid UTF-8 boundary.
 
 require_relative "env"
 
@@ -32,10 +43,28 @@ module OpenASNPipeline
 
     module_function
 
-    # asn_meta: { asn => AsJson::Record }
-    def write(path, asn_meta)
-      entries = asn_meta.keys.sort.filter_map do |asn|
-        name = asn_meta[asn].description.to_s.strip
+    # Precedence merge. override_names: { asn => { "name", "src" } } from
+    # Overrides#org_names; wikidata_names: { asn => { "name", "qid" } } from
+    # WikidataNames.parse. -> { asn => { "name", "source" } } where source is
+    # "override" or "wikidata:<QID>" (provenance for the manifest stats).
+    def merge(override_names, wikidata_names)
+      out = {}
+      (wikidata_names || {}).each { |asn, r| out[asn] = { "name" => r["name"], "source" => "wikidata:#{r['qid']}" } }
+      (override_names || {}).each { |asn, r| out[asn] = { "name" => r["name"], "source" => "override" } }
+      out
+    end
+
+    # -> { "total" => n, "override" => n, "wikidata" => n }
+    def source_counts(names)
+      counts = { "total" => names.size, "override" => 0, "wikidata" => 0 }
+      names.each_value { |r| counts[r["source"].split(":").first] += 1 }
+      counts
+    end
+
+    # names: { asn => { "name" => String, ... } } (Orgs.merge output)
+    def write(path, names)
+      entries = names.keys.sort.filter_map do |asn|
+        name = names[asn]["name"].to_s.strip
         next if name.empty?
 
         [asn, truncate_utf8(name, MAX_NAME)]
