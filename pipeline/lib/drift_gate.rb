@@ -68,10 +68,33 @@
 #   (layer counts move ~0.2%/week) and it gains the WARN tier, the weekly
 #   baseline recovery, and the ack path.
 #
+# REVIEWED BASELINES (2026-09-19, data-repo D-GATE-1 rule 8 / D-SRC-3)
+#
+#   An ack publishes a DELIBERATE step change (first case: X4B's Tier B
+#   feeds leaving the vpn overlay, vpn_ipv4 6,639 -> 4,692). Without more,
+#   every later night sits past the drop line below the best weekly pin, so
+#   the slide check WARNs forever, a warned build is never clean, and no
+#   weekly pin is ever cut again - for any metric. The pins would only age.
+#
+#   So an acked evaluation records a REVIEWED BASELINE for exactly the acked
+#   metric: {value, reason, reviewed_at}, stamped into manifest.json
+#   (stats.reviewed_baselines) and carried forward build to build. While it
+#   is newer than every weekly pin for that metric, it REPLACES those older
+#   pins for that metric: recovery, the slow-slide anchor, and the
+#   no-previous-build fallback all use it. The first clean pin cut after it
+#   supersedes it and it stops being carried. Other metrics are untouched.
+#
+#   A reviewed baseline is NOT a pin: it is never a release, it is written
+#   only by an ack (i.e. a human with a reason on the public record), and
+#   the acked build itself stays unclean and is never pinned. D-GATE-1's
+#   "pins come from clean builds only" is unchanged - the point is to let
+#   the next clean build be clean, so pinning resumes.
+#
 # LOG ENGAGEMENT: every evaluation logs exactly one line beginning with
 # "drift <STATUS> <metric>:" carrying the numbers and the thresholds, so a
 # green CI log always answers "did this gate run, and against what?".
 
+require "time"
 require_relative "env"
 
 module OpenASNPipeline
@@ -95,8 +118,21 @@ module OpenASNPipeline
     LAYER_POLICY   = Policy.new(warn: 0.05, fail_drop: 0.20, fail_rise: 0.20, recovery_band: 0.05).freeze
 
     # A long-run reference point: label is human-facing (the weekly pin tag),
-    # value is the metric at that pin (nil when the pin lacks the metric).
-    Baseline = Struct.new(:label, :value, keyword_init: true)
+    # value is the metric at that pin (nil when the pin lacks the metric),
+    # `at` the pin's build time (ISO-8601, nil if unknown), `kind` :pin or
+    # :reviewed (a reviewed baseline standing in for older pins).
+    Baseline = Struct.new(:label, :value, :at, :kind, keyword_init: true) do
+      def noun = kind == :reviewed ? "reviewed baseline" : "weekly pin"
+    end
+
+    # What an operator ack sanctioned for one metric (see REVIEWED BASELINES).
+    Reviewed = Struct.new(:metric, :value, :reason, :reviewed_at, keyword_init: true) do
+      def to_h = { "value" => value, "reason" => reason, "reviewed_at" => reviewed_at }
+
+      def to_baseline
+        Baseline.new(label: "#{reviewed_at.to_s[0, 10]} (ack: #{reason})", value: value, at: reviewed_at, kind: :reviewed)
+      end
+    end
 
     # What one evaluation concluded. `status` is one of
     #   :skipped  - nothing to compare against (first build ever)
@@ -109,7 +145,8 @@ module OpenASNPipeline
     # `slide` marks the boiled-frog case: night-over-night was fine, but the
     # value has drifted more than the drop line below the best weekly pin.
     Result = Struct.new(:metric, :status, :now, :prev, :prev_label, :drift, :baseline,
-                        :baseline_drift, :slide, :slide_from, :slide_drift, :ack, :policy, keyword_init: true) do
+                        :baseline_drift, :slide, :slide_from, :slide_drift, :ack, :policy, :reviewed,
+                        keyword_init: true) do
       def blocking? = status == :fail
 
       # One-line, number-bearing account of the comparison - used verbatim
@@ -119,11 +156,11 @@ module OpenASNPipeline
 
         s = format("%s: %d -> %d (%s vs %s)", metric, prev, now, pct(drift), prev_label)
         if baseline && !(slide && baseline == slide_from)
-          s += format("; within %s of weekly pin %s (%d)", pct(baseline_drift), baseline.label, baseline.value)
+          s += format("; within %s of %s %s (%d)", pct(baseline_drift), baseline.noun, baseline.label, baseline.value)
         end
         if slide
-          s += format("; but %s from the best weekly pin %s (%d) - a SLOW SLIDE no single night tripped",
-                      pct(slide_drift), slide_from.label, slide_from.value)
+          s += format("; but %s from the best %s %s (%d) - a SLOW SLIDE no single night tripped",
+                      pct(slide_drift), slide_from.noun, slide_from.label, slide_from.value)
         end
         s += %( - acknowledged: "#{ack}") if status == :acked
         s
@@ -139,13 +176,14 @@ module OpenASNPipeline
     # (most recent first). When `prev` is nil the most recent baseline
     # stands in for it - a missing `latest` asset must not disarm the gate
     # while pins exist.
-    def evaluate(metric:, now:, prev:, baselines: [], policy:, ack: ENV[ACK_ENV])
+    def evaluate(metric:, now:, prev:, baselines: [], policy:, ack: ENV[ACK_ENV], reviewed: nil)
       # A metric the build did not produce is ZERO, not nil: a layer that
       # vanishes must read as a -100% FAIL, never crash the gate with a
       # NoMethodError (which CI would report as "the pipeline broke", not
       # "the data broke" - a very different, much slower investigation).
       now = now.to_i
       baselines = baselines.select { |b| b.value.to_i.positive? }
+      baselines, in_effect = apply_reviewed(baselines, reviewed)
       # The best value the pinned history has seen, kept before `prev`
       # substitution consumes the newest pin. This is the anchor for the
       # slow-slide check below.
@@ -156,11 +194,11 @@ module OpenASNPipeline
         prev = baselines.first.value
         baselines = baselines.drop(1)
       end
-      return Result.new(metric: metric, status: :skipped, now: now, policy: policy) if prev.to_i.zero?
+      return Result.new(metric: metric, status: :skipped, now: now, policy: policy, reviewed: in_effect) if prev.to_i.zero?
 
       drift = (now - prev) / prev.to_f
       result = Result.new(metric: metric, now: now, prev: prev, prev_label: prev_label,
-                          drift: drift, policy: policy, ack: normalize_ack(ack))
+                          drift: drift, policy: policy, ack: normalize_ack(ack), reviewed: in_effect)
       result.status =
         if drift.abs <= policy.warn then :pass
         elsif drift.abs <= policy.fail_for(drift) then :warn
@@ -199,6 +237,43 @@ module OpenASNPipeline
       # the value they are sanctioning also sits far below every known-good
       # state; computing the slide only on the pass/warn path hid exactly that.
       check_slide(result, anchor)
+    end
+
+    # -> [baselines to use, the Reviewed still in effect (or nil)].
+    # Pins cut BEFORE the review predate the acknowledged step and are
+    # dropped for this metric - always, or the best of them would become
+    # the slide anchor again and restart the perpetual warn. Pins cut after
+    # it (necessarily from clean builds) are used in its place. The review
+    # is retired only once NO consulted pin predates it; until then it keeps
+    # being carried, because it is the cutoff that excludes those old pins.
+    # A pin with an unknown date counts as older - it cannot prove it
+    # postdates the review.
+    def apply_reviewed(baselines, reviewed)
+      return [baselines, nil] if reviewed.nil? || reviewed.value.to_i <= 0
+
+      since = parse_time(reviewed.reviewed_at)
+      return [baselines, nil] if since.nil?
+
+      newer = baselines.select { |b| (t = parse_time(b.at)) && t > since }
+      return [[reviewed.to_baseline], reviewed] if newer.empty?
+
+      [newer, newer.length < baselines.length ? reviewed : nil]
+    end
+
+    def parse_time(value)
+      value && Time.parse(value.to_s)
+    rescue ArgumentError
+      nil
+    end
+
+    # Reviewed baselines carried in a manifest's stats -> { metric => Reviewed }.
+    def reviewed_from(stats)
+      (stats && stats["reviewed_baselines"] || {}).each_with_object({}) do |(metric, h), out|
+        next unless h.is_a?(Hash) && h["value"].to_i.positive?
+
+        out[metric.to_s] = Reviewed.new(metric: metric.to_s, value: h["value"].to_i, reason: h["reason"],
+                                        reviewed_at: h["reviewed_at"])
+      end
     end
 
     # A pin is a usable recovery anchor only if it agrees with the best value
@@ -248,8 +323,10 @@ module OpenASNPipeline
 
     # Evaluate, log with numbers, record ack/recovery events for the
     # manifest, and raise StageFailure on :fail. Returns the Result.
-    def enforce!(metric:, now:, prev:, baselines: [], policy:, ack: ENV[ACK_ENV], gate: nil)
-      result = evaluate(metric: metric, now: now, prev: prev, baselines: baselines, policy: policy, ack: ack)
+    def enforce!(metric:, now:, prev:, baselines: [], policy:, ack: ENV[ACK_ENV], gate: nil, reviewed: nil)
+      result = evaluate(metric: metric, now: now, prev: prev, baselines: baselines, policy: policy, ack: ack,
+                        reviewed: reviewed)
+      reviewed_state[metric] = result.reviewed if result.reviewed # still in effect: carry it forward
       prefix = gate ? "#{gate}: " : ""
       case result.status
       when :skipped
@@ -275,6 +352,9 @@ module OpenASNPipeline
                  "this build supersedes degraded published data (stamped in manifest stats.drift_recovery)")
       when :acked
         events << result
+        # The value a human just sanctioned becomes this metric's reference
+        # until a clean pin supersedes it (REVIEWED BASELINES, file header).
+        reviewed_state[metric] = Reviewed.new(metric: metric, value: result.now, reason: result.ack, reviewed_at: nil)
         Env.warn("#{prefix}drift ACKED #{result.summary} - FAIL overridden for this run by " \
                  "#{ACK_ENV}; stamped into manifest stats.drift_ack")
       when :fail
@@ -305,16 +385,29 @@ module OpenASNPipeline
     def clean? = events.empty?
 
     def events = (@events ||= [])
-    def reset! = (@events = [])
+    # metric -> Reviewed in effect after this run. NOT an event: carrying a
+    # review forward does not make a build unclean (that is its purpose).
+    def reviewed_state = (@reviewed_state ||= {})
+
+    def reset!
+      @events = []
+      @reviewed_state = {}
+    end
 
     # The manifest fragment: present ONLY when something happened, so a
     # normal night's manifest is byte-identical in shape to before.
-    def manifest_stamp
+    def manifest_stamp(now: Time.now)
       acks = events.select { |e| e.status == :acked }
       recoveries = events.select { |e| e.status == :recovery }
       stamp = {}
       stamp[:drift_ack] = { reason: acks.first.ack, gates: acks.map(&:summary) } if acks.any?
       stamp[:drift_recovery] = recoveries.map(&:summary) if recoveries.any?
+      if reviewed_state.any?
+        stamped_at = now.utc.iso8601
+        stamp[:reviewed_baselines] = reviewed_state.sort.to_h do |metric, r|
+          [metric, r.to_h.merge("reviewed_at" => r.reviewed_at || stamped_at)]
+        end
+      end
       stamp
     end
 
@@ -323,7 +416,8 @@ module OpenASNPipeline
     def baselines_from(pins)
       pins.filter_map do |pin|
         value = yield(pin.stats)
-        Baseline.new(label: pin.label, value: value) if value.to_i.positive?
+        at = pin.respond_to?(:build_id) ? pin.build_id : nil
+        Baseline.new(label: pin.label, value: value, at: at, kind: :pin) if value.to_i.positive?
       end
     end
 

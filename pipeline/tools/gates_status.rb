@@ -141,9 +141,17 @@ module OpenASNPipeline
                            "workflow with dated_tag=true)."
       end
 
+      # An acked step change re-anchors its metric (drift_gate.rb REVIEWED
+      # BASELINES); the forecast must use the same reference the gate will.
+      reviewed_all = DriftGate.reviewed_from(latest["stats"])
+      reviewed_all.each_value do |r|
+        out.puts "reviewed baseline: #{r.metric}=#{r.value} since #{r.reviewed_at} (ack: #{r.reason}) — " \
+                 "replaces older weekly pins for that metric until a clean pin supersedes it"
+      end
+      reviewed = reviewed_all["hosting_asns"]
       simulate = lambda do |baselines|
         DriftGate.evaluate(metric: "hosting_asns", now: healthy, prev: prev, baselines: baselines,
-                           policy: DriftGate::HOSTING_POLICY, ack: nil)
+                           policy: DriftGate::HOSTING_POLICY, ack: nil, reviewed: reviewed)
       end
       pin_baselines = DriftGate.baselines_from(pins) { |s| s["hosting_asns"] }
       bare = simulate.call([])
@@ -152,7 +160,8 @@ module OpenASNPipeline
       # Is the CURRENTLY PUBLISHED value itself sliding away from the pins?
       # (`now: prev` - we are grading latest, not a hypothetical tonight.)
       published = DriftGate.evaluate(metric: "hosting_asns", now: prev, prev: prev,
-                                     baselines: pin_baselines, policy: DriftGate::HOSTING_POLICY, ack: nil)
+                                     baselines: pin_baselines, policy: DriftGate::HOSTING_POLICY, ack: nil,
+                                     reviewed: reviewed)
       if published.slide
         problems << "SLOW SLIDE: the published hosting count is #{format('%+.1f%%', published.baseline_drift * 100)} " \
                     "from the best weekly pin #{published.baseline.label} (#{published.baseline.value}) — a " \

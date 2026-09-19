@@ -128,8 +128,12 @@ module OpenASNPipeline
         return
       end
 
+      # Reviewed baselines ride in the previous manifest (an acked step change
+      # re-anchors its own metric only - lib/drift_gate.rb REVIEWED BASELINES).
+      reviewed = DriftGate.reviewed_from(previous_stats)
       results = layers.map do |layer|
         DriftGate.enforce!(
+          reviewed: reviewed[layer],
           gate: "G4",
           metric: layer,
           now: current[layer], # nil (layer gone) reads as 0 -> -100% FAIL, see DriftGate.evaluate

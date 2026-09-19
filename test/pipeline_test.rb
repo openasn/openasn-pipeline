@@ -7,6 +7,7 @@
 
 require_relative "test_helper"
 require "stringio"
+require "json"
 require_relative "../pipeline/crosscheck"
 require_relative "../pipeline/validate"
 
@@ -792,6 +793,147 @@ module OpenASNPipeline
         Validate.check_deltas!(gone, { "layer_counts" => counts }, [])
       end
       assert_match(/G4: drift FAIL dc_ipv4: 29070 -> 0 \(-100\.0% vs previous build\)/, err.message)
+    end
+  end
+
+  # REVIEWED BASELINES (lib/drift_gate.rb header; data-repo D-GATE-1 rule 8).
+  # The real case: D-SRC-3 removed X4B's Tier B feeds, vpn_ipv4 6,639 ->
+  # 4,692 (-29.3%). Before this, the acked publish was followed by a
+  # WARN(SLIDE) every night against the 6,593 pin, every build was unclean,
+  # and no weekly pin could ever be cut again. A state machine, so these are
+  # night-by-night sequence tests through the real G4 gate.
+  class ReviewedBaselineTest < Minitest::Test
+    include DriftTestHelpers
+
+    FakeArtifact = Struct.new(:counts)
+    ACK = "D-SRC-3: X4B third-party feeds removed from the vpn overlay"
+    PIN_0913 = { "base_ipv4" => 442_462, "vpn_ipv4" => 6_593, "dc_ipv4" => 30_068, "base_ipv6" => 125_775 }.freeze
+    PIN_0823 = { "base_ipv4" => 439_199, "vpn_ipv4" => 6_565, "dc_ipv4" => 29_070, "base_ipv6" => 126_053 }.freeze
+    LATEST   = { "base_ipv4" => 443_267, "vpn_ipv4" => 6_639, "dc_ipv4" => 30_143, "base_ipv6" => 125_825 }.freeze
+
+    def artifacts(vpn:, dc: 30_105, base4: 443_282, base6: 125_796)
+      { ipv4: FakeArtifact.new({ base: base4, vpn: vpn, dc: dc, relay: 0 }),
+        ipv6: FakeArtifact.new({ base: base6, vpn: 0, dc: 0, relay: 0 }) }
+    end
+
+    def old_pins
+      [Crosscheck::Pin.new(label: "v2026.09.13", stats: { "layer_counts" => PIN_0913 }, build_id: "2026-09-13T08:18:05Z"),
+       Crosscheck::Pin.new(label: "v2026.08.23", stats: { "layer_counts" => PIN_0823 }, build_id: "2026-08-23T03:59:55Z")]
+    end
+
+    # What the next night reads back: the published manifest's stats, as JSON.
+    def published_stats(counts)
+      JSON.parse(JSON.generate({ "layer_counts" => counts }.merge(DriftGate.manifest_stamp(now: Time.utc(2026, 9, 19, 8)))))
+    end
+
+    def ack_night
+      ENV[DriftGate::ACK_ENV] = ACK
+      Validate.check_deltas!(artifacts(vpn: 4_692), { "layer_counts" => LATEST }, old_pins)
+      published_stats(LATEST.merge("vpn_ipv4" => 4_692, "dc_ipv4" => 30_105))
+    ensure
+      ENV.delete(DriftGate::ACK_ENV)
+    end
+
+    def next_night(prev_stats, vpn: 4_700, dc: 30_110, pins: old_pins)
+      DriftGate.reset!
+      @log.truncate(@log.rewind)
+      Validate.check_deltas!(artifacts(vpn: vpn, dc: dc), prev_stats, pins)
+      published_stats(prev_stats["layer_counts"].merge("vpn_ipv4" => vpn, "dc_ipv4" => dc))
+    end
+
+    def test_the_ack_records_a_reviewed_baseline_for_exactly_the_acked_metric
+      stats = ack_night
+      assert_equal [:acked], DriftGate.events.map(&:status)
+      refute DriftGate.clean?, "the acked build itself is never pinnable"
+      assert_equal ["vpn_ipv4"], stats["reviewed_baselines"].keys, "dc/base passed: they get no reviewed baseline"
+      assert_equal({ "value" => 4_692, "reason" => ACK, "reviewed_at" => "2026-09-19T08:00:00Z" },
+                   stats["reviewed_baselines"]["vpn_ipv4"])
+    end
+
+    def test_next_night_is_clean_with_no_slide_warning
+      stats = next_night(ack_night)
+      assert DriftGate.clean?, "no perpetual warn: the night after the ack must be pinnable (#{DriftGate.events.map(&:summary)})"
+      refute_match(/SLIDE/, log)
+      assert_match(/G4: drift PASS vpn_ipv4: 4692 -> 4700/, log)
+      assert_equal "2026-09-19T08:00:00Z", stats.dig("reviewed_baselines", "vpn_ipv4", "reviewed_at"),
+                   "carried forward unchanged until a clean pin supersedes it"
+      # A week of ordinary nights stays clean too.
+      [4_688, 4_705, 4_699, 4_710, 4_694].each { |v| stats = next_night(stats, vpn: v) }
+      assert DriftGate.clean?
+    end
+
+    def pin_of(label, at, stats) = Crosscheck::Pin.new(label: label, build_id: at, stats: { "layer_counts" => stats["layer_counts"] })
+
+    def test_pins_resume_and_the_review_retires_once_no_older_pin_is_consulted
+      stats = next_night(ack_night)
+      assert DriftGate.clean? # so publish.rb cuts the Sunday pin from this build
+      p1 = pin_of("v2026.09.20", "2026-09-20T08:10:00Z", stats)
+
+      # Crosscheck consults the two newest pins: [new clean pin, old 6,593 pin].
+      stats = next_night(stats, pins: [p1, old_pins.first])
+      assert DriftGate.clean?, "the old 6,593 pin must not come back as the slide anchor (#{DriftGate.events.map(&:summary)})"
+      refute_match(/SLIDE/, log)
+      assert stats["reviewed_baselines"], "still carried: it is the cutoff that keeps the pre-review pin out"
+      p2 = pin_of("v2026.09.27", "2026-09-27T08:10:00Z", stats)
+
+      stats = next_night(stats, pins: [p2, p1])
+      assert DriftGate.clean?
+      assert_nil stats["reviewed_baselines"], "both consulted pins postdate the review: retired"
+
+      # From here the ordinary pin machinery is back: a slide is measured from the new pins.
+      low = { "layer_counts" => stats["layer_counts"].merge("vpn_ipv4" => 3_900) }
+      next_night(low, vpn: 3_700, pins: [p2, p1])
+      assert_match(/drift WARN\(SLIDE\) vpn_ipv4: 3900 -> 3700 .*best weekly pin v2026\.09\.(20|27) \(47\d\d\)/, log)
+    end
+
+    def test_the_reviewed_baseline_still_guards_its_metric
+      stats = ack_night
+      # A real new -25% drop after the review still FAILS - the old 6,593 pin
+      # must not be able to "rescue" anything, and the review is no free pass.
+      err = assert_raises(StageFailure) { next_night(stats, vpn: 3_500) }
+      assert_match(/drift FAIL vpn_ipv4: 4692 -> 3500/, err.message)
+      # And a snap-back to the reviewed value after a bad published night is a recovery.
+      degraded = stats.merge("layer_counts" => stats["layer_counts"].merge("vpn_ipv4" => 3_000))
+      next_night(degraded, vpn: 4_690)
+      assert_equal [:recovery], DriftGate.events.map(&:status)
+      assert_match(/within -0\.0% of reviewed baseline 2026-09-19 \(ack: D-SRC-3/, log)
+    end
+
+    def test_an_unacked_metric_is_still_gated_against_the_old_pins
+      stats = ack_night
+      # dc has no reviewed baseline: a -25% dc cliff fails exactly as before...
+      err = assert_raises(StageFailure) { next_night(stats, dc: 22_000) }
+      assert_match(/drift FAIL dc_ipv4: 30105 -> 22000/, err.message)
+      # ...and a dc value sitting 21% under the old pin still warns as a slide.
+      stats_low = stats.merge("layer_counts" => stats["layer_counts"].merge("dc_ipv4" => 24_000))
+      next_night(stats_low, dc: 23_800)
+      assert_match(/drift WARN\(SLIDE\) dc_ipv4: 24000 -> 23800 .*best weekly pin v2026\.09\.13 \(30068\)/, log)
+      refute DriftGate.clean?
+    end
+
+    # crosscheck's hosting gate reads the same stamp.
+    def test_crosscheck_honours_a_reviewed_hosting_baseline
+      meta = {}
+      (1..11_000).each { |i| meta[i] = AsJson::Record.new(i, "h", "US", "hosting", "stub") }
+      normalized = { asn_meta: meta, x4b_dc_asns: Set.new(1..900), bad_asns: Set.new }
+      prev = { "hosting_asns" => 11_000,
+               "reviewed_baselines" => { "hosting_asns" => { "value" => 11_000, "reason" => "verified merge",
+                                                             "reviewed_at" => "2026-09-19T08:00:00Z" } } }
+      pins = [Crosscheck::Pin.new(label: "v2026.09.13", stats: { "hosting_asns" => 12_467 }, build_id: "2026-09-13T08:18:05Z")]
+      Crosscheck.run(normalized, previous_stats: prev, baseline_stats: pins)
+      assert DriftGate.clean?, log
+      Crosscheck.run(normalized, previous_stats: prev.except("reviewed_baselines"), baseline_stats: pins)
+      assert_match(/WARN\(SLIDE\) hosting_asns/, log, "without the review the -11.8% step is a perpetual slide")
+    end
+
+    def test_a_pin_of_unknown_date_cannot_supersede_a_review
+      r = DriftGate::Reviewed.new(metric: "vpn_ipv4", value: 4_692, reason: ACK, reviewed_at: "2026-09-19T08:00:00Z")
+      res = DriftGate.evaluate(metric: "vpn_ipv4", now: 4_700, prev: 4_692, policy: DriftGate::LAYER_POLICY, ack: nil,
+                               baselines: [DriftGate::Baseline.new(label: "v?", value: 6_593)], reviewed: r)
+      assert_equal :pass, res.status
+      assert_equal r, res.reviewed
+      assert_empty DriftGate.reviewed_from(nil)
+      assert_empty DriftGate.reviewed_from({ "reviewed_baselines" => { "vpn_ipv4" => { "value" => 0 } } })
     end
   end
 
