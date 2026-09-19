@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require "zlib"
+require "ipaddr"
+require "socket"
 require_relative "../../lib/env"
 require_relative "../../lib/http"
 
@@ -20,7 +22,17 @@ module OpenASNPipeline
     #
     # Format (gzipped, tab-separated): "prefix\tprefixlen\tAS". The AS field may be a
     # MOAS set ("AS1_AS2") or multi-origin ("AS1,AS2"); we attribute the prefix to
-    # each listed origin. Files are DATED snapshots, so we discover the newest file in
+    # each listed origin.
+    #
+    # ADDRESS COUNTS ARE UNIONS (fixed 2026-09-19): an AS routinely announces a covering
+    # aggregate AND more-specifics inside it (10.0.0.0/16 + 10.0.1.0/24). Summing
+    # 2^(32-len) per prefix counted that space two or more times (Orange Egypt AS37069:
+    # 13.26M summed vs 4.51M unique, which equals CAIDA's cone for its single-AS cone).
+    # ipv4_addresses / ipv6_addresses are therefore the size of the UNION of the AS's
+    # announced ranges; prefixes_v4 / prefixes_v6 stay plain prefix counts. Space announced
+    # by two DIFFERENT origins (MOAS, or a customer's more-specific inside a provider
+    # aggregate) still counts once for EACH origin: these are per-AS figures and must not
+    # be summed across ASes to get a world total. Files are DATED snapshots, so we discover the newest file in
     # the current (or previous) month directory. ipv6_addresses is an astronomically
     # large integer -> serialized as a STRING.
     module Prefixes
@@ -70,38 +82,75 @@ module OpenASNPipeline
       end
 
       # Accumulate counts from an enumerable of pfx2as lines into `acc` (numeric, no stringify).
-      def accumulate(lines, acc)
+      # Each AS's announced ranges are collected in `spans` ({asn => {v4: [[first, last], ...], v6: [...]}});
+      # `finalize` then turns them into de-duplicated address counts.
+      def accumulate(lines, acc, spans = {})
         lines.each do |line|
           p = parse_line(line) or next
           v6, len, origins = p
           next if v6 ? (len > 128 || len < 1) : (len > 32 || len < 1)
+          first = address_int(line.split("\t", 2).first, v6) or next
+          size = 1 << ((v6 ? 128 : 32) - len)
+          first &= ~(size - 1) # a non-canonical "10.0.0.1/24" counts as its network 10.0.0.0/24
           origins.each do |asn|
             x = (acc[asn] ||= { "prefixes_v4" => 0, "prefixes_v6" => 0, "ipv4_addresses" => 0, "ipv6_addresses" => 0 })
-            if v6
-              x["prefixes_v6"] += 1
-              x["ipv6_addresses"] += (1 << (128 - len))
-            else
-              x["prefixes_v4"] += 1
-              x["ipv4_addresses"] += (1 << (32 - len))
-            end
+            x[v6 ? "prefixes_v6" : "prefixes_v4"] += 1
+            ((spans[asn] ||= { v4: [], v6: [] })[v6 ? :v6 : :v4]) << [first, first + size - 1]
           end
         end
         acc
       end
 
+      # Set each AS's address counts in `acc` to the size of the union of its announced ranges.
+      def finalize(acc, spans)
+        spans.each do |asn, by_af|
+          acc[asn]["ipv4_addresses"] = union_size(by_af[:v4])
+          acc[asn]["ipv6_addresses"] = union_size(by_af[:v6])
+        end
+        acc
+      end
+
+      # Distinct addresses covered by inclusive [first, last] ranges (overlaps and duplicates counted once).
+      def union_size(ranges)
+        total = 0
+        cur_first = cur_last = nil
+        ranges.sort.each do |f, l|
+          if cur_last && f <= cur_last + 1
+            cur_last = l if l > cur_last
+          else
+            total += cur_last - cur_first + 1 if cur_last
+            cur_first = f
+            cur_last = l
+          end
+        end
+        total += cur_last - cur_first + 1 if cur_last
+        total
+      end
+
+      # "1.2.3.0" / "2001:db8::" -> Integer, nil if unparseable.
+      def address_int(text, v6)
+        IPAddr.new(text, v6 ? Socket::AF_INET6 : Socket::AF_INET).to_i
+      rescue IPAddr::Error, ArgumentError
+        nil
+      end
+
       # Pure test helper: full text blob -> counts (with ipv6 stringified).
       def tally(text)
         acc = {}
-        accumulate(text.each_line, acc)
+        spans = {}
+        accumulate(text.each_line, acc, spans)
+        finalize(acc, spans)
         acc.each_value { |a| a["ipv6_addresses"] = a["ipv6_addresses"].to_s }
         acc
       end
 
       def fetch_all(http: Http.new)
         acc = {}
+        spans = {}
         route_files(http: http).each do |_af, path|
-          Zlib::GzipReader.open(path) { |gz| accumulate(gz, acc) }
+          Zlib::GzipReader.open(path) { |gz| accumulate(gz, acc, spans) }
         end
+        finalize(acc, spans)
         acc.each_value { |a| a["ipv6_addresses"] = a["ipv6_addresses"].to_s } # bignum -> string
         acc
       end
