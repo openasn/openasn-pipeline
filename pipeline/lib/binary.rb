@@ -160,12 +160,31 @@ module OpenASNPipeline
       def in_dc?(ip_int)  = !find(@dc, @orec, ip_int) { |off| off }.nil?
 
       def each_base
+        return enum_for(:each_base) unless block_given?
+
         (@counts[:base]).times do |i|
           off = i * @brec
           s = Binary.unpack_addr(@base[off, @asz], @family)
           e = Binary.unpack_addr(@base[off + @asz, @asz], @family)
           asn, flags = @base[off + 2 * @asz, 6].unpack("Nn")
           yield [s, e, asn, flags]
+        end
+      end
+
+      # Read-only iteration over one overlay layer (:vpn, :dc, :relay) in
+      # stored order. A lookup only ever needs the binary-search entry points
+      # above, but the export input adapter has to walk and re-validate every
+      # layer: Binary.write verifies sorted/disjoint for the BASE layer only,
+      # so a reader that assumes the writer checked the overlays is trusting
+      # a check that was never made.
+      def each_overlay(layer)
+        return enum_for(:each_overlay, layer) unless block_given?
+
+        str = { vpn: @vpn, dc: @dc, relay: @rel }.fetch(layer)
+        (str.bytesize / @orec).times do |i|
+          off = i * @orec
+          yield [Binary.unpack_addr(str[off, @asz], @family),
+                 Binary.unpack_addr(str[off + @asz, @asz], @family)]
         end
       end
 

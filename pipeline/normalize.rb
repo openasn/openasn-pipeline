@@ -8,7 +8,8 @@
 # Canonical shapes produced:
 #   base_v4 / base_v6 : sorted arrays of [start_int, end_int, asn]
 #   asn_meta          : { asn => AsJson::Record }
-#   vpn_v4 / dc_v4    : sorted merged arrays of [start_int, end_int]
+#   vpn_v4 / dc_v4    : sorted merged arrays of [start_int, end_int], with
+#                       X4B's third-party feeds removed (lib/x4b_first_party.rb)
 #   bad_asns          : Set[Integer]
 #   x4b_vpn_asns / x4b_dc_asns : Set[Integer] (crosscheck reference + seeds)
 #   wikidata_names    : { asn => { "name", "qid" } } (CC0 org names, D-SRC-2)
@@ -20,6 +21,7 @@ require "set"
 require_relative "lib/env"
 require_relative "lib/ipmath"
 require_relative "lib/asjson"
+require_relative "lib/x4b_first_party"
 require_relative "lib/wikidata_names"
 require_relative "lib/wikidata_countries"
 require_relative "fetch"
@@ -30,17 +32,36 @@ module OpenASNPipeline
 
     def run(paths)
       out = {}
-      out[:base_v4] = parse_origin_asn(paths[:sapics_v4], IPMath::V4_MAX, "origin-asn ipv4")
-      out[:base_v6] = parse_origin_asn(paths[:sapics_v6], IPMath::V6_MAX, "origin-asn ipv6")
+      # :backbone_v4/_v6 are rib2origin's output (RouteViews, default) or, with
+      # OPENASN_BACKBONE=sapics, sapics' origin-asn files in the same shape (fetch.rb).
+      out[:base_v4] = parse_origin_asn(paths[:backbone_v4], IPMath::V4_MAX, "origin-asn ipv4")
+      out[:base_v6] = parse_origin_asn(paths[:backbone_v6], IPMath::V6_MAX, "origin-asn ipv6")
 
       out[:asn_meta] = parse_as_metadata(paths[:as_json])
-
-      out[:vpn_v4] = parse_cidr_list(paths[:x4b_vpn], "x4b vpn")
-      out[:dc_v4]  = parse_cidr_list(paths[:x4b_dc], "x4b datacenter")
 
       out[:bad_asns]     = parse_bad_asn_csv(paths[:bad_asn])
       out[:x4b_vpn_asns] = parse_x4b_asn_file(paths[:x4b_vpn_asn])
       out[:x4b_dc_asns]  = parse_x4b_asn_file(paths[:x4b_dc_asn])
+
+      # X4B's published overlays merge third-party feeds (Apple relay,
+      # Mullvad, PIA, Proton) that are Tier B for us. vpn keeps only what
+      # X4B's own first-party inputs justify; dc has the named feed file
+      # stripped (lib/x4b_first_party.rb says why the methods differ;
+      # data-repo DECISIONS.md D-SRC-3). dc is justified by BOTH ASN lists
+      # because X4B's build-list.yml expands input/vpn/ASN.txt into it too.
+      vpn_published = parse_cidr_list(paths[:x4b_vpn], "x4b vpn")
+      res = X4BFirstParty.restrict(vpn_published, base_rows: out[:base_v4], asns: out[:x4b_vpn_asns],
+                                                  manual: parse_cidr_list(paths[:x4b_vpn_manual], "x4b vpn Manual.txt"))
+      X4BFirstParty.log("x4b vpn", res)
+      out[:vpn_v4] = res.ranges
+
+      dc_published = parse_cidr_list(paths[:x4b_dc], "x4b datacenter")
+      dc_feeds = IPMath.merge_ranges(paths[:x4b_dc_feeds].flat_map { |p| parse_cidr_list(p, "x4b dc feed #{File.basename(p)}") })
+      res = X4BFirstParty.strip_feeds(dc_published, feeds: dc_feeds, base_rows: out[:base_v4],
+                                                    asns: out[:x4b_dc_asns] | out[:x4b_vpn_asns],
+                                                    manual: parse_cidr_list(paths[:x4b_dc_manual], "x4b datacenter Manual.txt"))
+      X4BFirstParty.log("x4b datacenter", res)
+      out[:dc_v4] = res.ranges
 
       out[:wikidata_names], out[:wikidata_stats] = parse_wikidata(paths[:wikidata])
       out[:wikidata_countries], out[:wikidata_country_stats] = parse_wikidata_countries(paths[:wikidata_countries])
@@ -123,24 +144,27 @@ module OpenASNPipeline
       Env.fail_stage!("wikidata P3797: unparseable response (#{e.message}) - did the endpoint return an error page?")
     end
 
-# Same failure policy as parse_wikidata.
-def parse_wikidata_countries(path)
-  items, stats = WikidataCountries.parse(File.read(path))
-  dropped = stats.except("statements", "items_with_country", "sar", "territory").map { |k, v| "#{k}=#{v}" }.join(", ")
-  Env.log("wikidata P17/P159: #{stats['statements']} statements -> #{items.size} items with one country " \
-          "(HK/MO refined: #{stats['sar'].to_i}, territory -> recognised state: #{stats['territory'].to_i}; dropped: #{dropped})")
-  [items, stats]
-rescue JSON::ParserError, ArgumentError => e
-  Env.fail_stage!("wikidata P17/P159: unparseable response (#{e.message}) - did the endpoint return an error page?")
-end
+    # Same failure policy as parse_wikidata.
+    def parse_wikidata_countries(path)
+      items, stats = WikidataCountries.parse(File.read(path))
+      dropped = stats.except("statements", "items_with_country", "sar", "territory").map { |k, v| "#{k}=#{v}" }.join(", ")
+      Env.log("wikidata P17/P159: #{stats['statements']} statements -> #{items.size} items with one country " \
+              "(HK/MO refined: #{stats['sar'].to_i}, territory -> recognised state: #{stats['territory'].to_i}; dropped: #{dropped})")
+      [items, stats]
+    rescue JSON::ParserError, ArgumentError => e
+      Env.fail_stage!("wikidata P17/P159: unparseable response (#{e.message}) - did the endpoint return an error page?")
+    end
 
-def parse_cidr_list(path, label)
+    def parse_cidr_list(path, label)
       ranges = []
       bad = 0
       File.foreach(path) do |line|
         stripped = line.strip
         next if stripped.empty? || stripped.start_with?("#")
 
+        # First token only, like X4B's own build (`grep -v '^#' | awk
+        # '{print $1}'`): hand-curated files carry `CIDR # reason` lines.
+        stripped = stripped.split(/[\s#]/, 2).first
         begin
           s, e, family = IPMath.cidr_to_range(stripped)
           # X4B is IPv4-only; skip any future v6 lines rather than corrupt the v4 layer.

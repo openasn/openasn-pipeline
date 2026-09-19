@@ -1,0 +1,289 @@
+name: Export toolchains
+
+# Everything the portable exports need that test.yml deliberately does NOT
+# install. The split is the point: a contributor editing a classifier waits
+# on Ruby and nothing else, while the jobs that need a Python with a SQLite
+# engine and a Go compiler run here, in parallel, and fail with their own
+# names in the Checks list.
+#
+# PRD §17.1 asks for six things. Where each one lives:
+#
+#   Ruby suite + export unit tests ......... test.yml (unchanged, and fast)
+#   Python SQLite tests, stdlib only ....... python-sqlite
+#   Go build/vet/test + MMDB verification .. go-mmdb
+#   End-to-end synthetic generation ........ synthetic-end-to-end
+#   Old-native-consumer manifest compat .... test.yml (U22 fixtures) AND
+#                                            synthetic-end-to-end, against
+#                                            a real assembled manifest
+#   Reproducibility ........................ reproducibility
+#
+# Nothing here fetches upstream data, touches a secret, needs the dataset
+# repo checked out, or can publish anything: every job works from bytes the
+# harness makes up, and the generation runs through exports:from_release,
+# which refuses to run under PUBLISH=1 and stamps its output NOT-PUBLISHABLE.
+#
+# Action majors match the dataset repo's nightly-build.yml on purpose - the
+# two install the same toolchains and should not drift. checkout v7 /
+# setup-python v7 / setup-go v7 run on Node 24; the v4s they replaced
+# targeted Node 20, deprecated:
+# https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+#
+# NO COMPILED-BINARY CACHE, unlike the nightly. The nightly caches
+# openasn-mmdb because it rebuilds DATA every night from a tool that rarely
+# changes; these jobs exist to prove the tool builds and behaves from the
+# source in THIS commit, and handing them a binary built from other source
+# is exactly the "stale build output substituting for a current compile"
+# that PRD §17.2 forbids. The Go module downloads and the bundle are cached
+# (by go.sum / Gemfile.lock, OS and toolchain version), which is where the
+# time actually goes.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Narrower than the repository default: nothing here writes, comments,
+# uploads or publishes.
+permissions:
+  contents: read
+
+jobs:
+  # The SQLite writer's own unit suite, stdlib only, under an interpreter
+  # chosen the way the release producer chooses it. WHICH interpreter is not
+  # a detail: sqlite3.sqlite_version decides the physical database file, so
+  # a green suite under an engine that never writes a release proves nothing
+  # about a release.
+  python-sqlite:
+    name: Python SQLite writer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      # Pinned to the same 3.12 the nightly pins, so the engine that writes
+      # a CI database is the engine that writes a released one.
+      - id: python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # A python3 on PATH that dies on startup - which is not a hypothetical:
+      # on the maintainer's machine `python3` is a Python 3.4 that exits 137,
+      # and that measured trap is the entire reason sqlite.rb resolves the
+      # interpreter from an ordered list of ABSOLUTE paths instead of asking
+      # PATH. Every check below runs with this thing first on PATH.
+      - name: Put a deliberately broken python3 first on PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/broken-python"
+          printf '#!/bin/sh\nexit 137\n' > "$RUNNER_TEMP/broken-python/python3"
+          chmod +x "$RUNNER_TEMP/broken-python/python3"
+          echo "$RUNNER_TEMP/broken-python" >> "$GITHUB_PATH"
+
+      # The release-producer configuration: OPENASN_PYTHON names the
+      # interpreter and nothing else may be chosen. The task prints the
+      # resolved command, sys.version and sqlite3.sqlite_version before it
+      # asserts anything, so the log records which engine was under test.
+      - name: Tests under the pinned interpreter
+        env:
+          OPENASN_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -o pipefail
+          bundle exec rake exports:python_test 2>&1 | tee pinned.log
+          if ! grep -qF "\"command\": \"$OPENASN_PYTHON\"" pinned.log; then
+            echo "::error::the writer did not run under OPENASN_PYTHON ($OPENASN_PYTHON)"
+            exit 1
+          fi
+
+      # The local-developer configuration: no override, a broken python3
+      # first on PATH, and the resolver still has to land on a healthy
+      # absolute candidate rather than following PATH into the wreck.
+      - name: Tests with no override, so resolution cannot follow PATH
+        run: |
+          set -o pipefail
+          bundle exec rake exports:python_test 2>&1 | tee resolved.log
+          if grep -qF "$RUNNER_TEMP/broken-python" resolved.log; then
+            echo "::error::interpreter resolution followed PATH to the broken python3"
+            exit 1
+          fi
+
+      # And an explicit bad choice must fail LOUDLY rather than silently
+      # falling back, or the override would be a suggestion.
+      - name: A broken OPENASN_PYTHON fails instead of falling back
+        run: |
+          if OPENASN_PYTHON="$RUNNER_TEMP/broken-python/python3" \
+             bundle exec rake exports:python_test > broken.log 2>&1; then
+            echo "::error::a broken OPENASN_PYTHON was accepted"
+            cat broken.log
+            exit 1
+          fi
+          grep -q "no usable Python" broken.log
+
+  # The Go tool: formatting, build, vet, its own unit suite, and then the
+  # Ruby MMDB acceptance suite through `rake exports:mmdb_test`, which is the
+  # one task in the repo that refuses to skip when Go is missing.
+  go-mmdb:
+    name: Go MMDB writer
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      # The toolchain version comes from the module's own `go` directive and
+      # the module cache key from go.sum, so neither is a number typed here
+      # that could drift away from the lockfile.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: tools/mmdbwriter/go.mod
+          cache-dependency-path: tools/mmdbwriter/go.sum
+
+      - name: Record the Go toolchain
+        run: go version
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l tools/mmdbwriter)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would rewrite: $unformatted"
+            gofmt -d tools/mmdbwriter
+            exit 1
+          fi
+
+      - name: go build
+        run: go -C tools/mmdbwriter build ./...
+
+      - name: go vet
+        run: go -C tools/mmdbwriter vet ./...
+
+      - name: go test
+        run: go -C tools/mmdbwriter test ./...
+
+      # Builds the tool into the disposable workspace and runs the Ruby MMDB
+      # acceptance suite against it. Those tests read every database back
+      # through MiniMMDB, a reader written from the format spec that shares
+      # no code with either Go library.
+      - name: MMDB acceptance suite
+        run: bundle exec rake exports:mmdb_test
+
+  # A whole release, from synthetic native bytes to an assembled candidate,
+  # with all three writers and all three independent readers. It reuses the
+  # operator tasks that ship (exports:from_release, exports:validate) rather
+  # than a parallel path written for CI, so a break in the tooling an
+  # operator actually runs is a break here.
+  synthetic-end-to-end:
+    name: Synthetic end-to-end (all formats)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # `all` = SQLite + CSV + MMDB. The dataset's production contract still
+      # requires `none`; PRD §17.4 step 2 is explicit that a mode is
+      # validated in non-publishing runs BEFORE it is activated, which is
+      # exactly what this job is.
+      OPENASN_EXPORTS: all
+      CI_DIR: build/work/ci-e2e
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - id: python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: tools/mmdbwriter/go.mod
+          cache-dependency-path: tools/mmdbwriter/go.sum
+
+      # The producer environment, in the log, before anything is built - the
+      # first thing to diff when bytes stop reproducing. OPENASN_PYTHON is
+      # exported here rather than set per step so that every task below is
+      # driven by the same interpreter this line named.
+      - name: Record the producer toolchain
+        env:
+          PY: ${{ steps.python.outputs.python-path }}
+        run: |
+          ruby -v
+          "$PY" -c 'import sys, sqlite3; print("python", sys.version.split()[0], "at", sys.executable); print("sqlite", sqlite3.sqlite_version)'
+          go version
+          echo "OPENASN_PYTHON=$PY" >> "$GITHUB_ENV"
+
+      - name: Write the synthetic OASN/OORG release
+        run: bundle exec rake "exports:synthetic[$CI_DIR]"
+
+      # Project and serialize all three formats. from_release verifies every
+      # input against the synthetic manifest first, records `unknown`
+      # revisions, and drops a NOT-PUBLISHABLE marker beside its output.
+      - name: Project and emit every format
+        run: bundle exec rake "exports:from_release[$CI_DIR/release,$CI_DIR/export]"
+
+      # Re-open each finished file with a reader that did not write it:
+      # stdlib CSV and Zlib::GzipReader for the CSV, sqlite.py's read-only
+      # verify for the database (query plans, seeded lookups, row-by-row
+      # against the spool), and maxminddb-golang for the MMDB - a library
+      # the mmdbwriter that produced it shares no code with.
+      - name: Re-open every format with an independent reader
+        run: bundle exec rake "exports:validate[$CI_DIR/export]"
+
+      # The asset registry, manifest.json and SHA256SUMS, all re-read from
+      # disk, plus the old-client contract against a REAL assembled manifest
+      # rather than a fixture: a native consumer must resolve its three
+      # artifacts and ignore every additive entry, including one this build
+      # invented that no client has ever heard of.
+      - name: Assemble and check the release candidate
+        run: bundle exec rake "exports:candidate[$CI_DIR]"
+
+  # PRD §17.1: the same synthetic input bytes at the same fixed timestamp,
+  # twice, compared on every payload hash. The claim is scoped - byte
+  # identity holds WITHIN the recorded producer environment, because a
+  # different SQLite library writes a physically different database and a
+  # different zlib deflates differently - so the job records the toolchain
+  # it reproduced under and asserts nothing about any other runner.
+  reproducibility:
+    name: Reproducibility (same input, fixed timestamp, twice)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OPENASN_EXPORTS: all
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - id: python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: tools/mmdbwriter/go.mod
+          cache-dependency-path: tools/mmdbwriter/go.sum
+
+      - name: Record the producer toolchain
+        env:
+          PY: ${{ steps.python.outputs.python-path }}
+        run: |
+          ruby -v
+          "$PY" -c 'import sys, sqlite3; print("python", sys.version.split()[0], "at", sys.executable); print("sqlite", sqlite3.sqlite_version)'
+          go version
+          echo "OPENASN_PYTHON=$PY" >> "$GITHUB_ENV"
+
+      - name: Build the same generation twice and compare payload hashes
+        run: bundle exec rake "exports:reproducibility[build/work/ci-repro]"

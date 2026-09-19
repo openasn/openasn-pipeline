@@ -13,6 +13,13 @@
 #
 # In GitHub Actions, a trip additionally opens an issue automatically
 # (see nightly-build.yml in the data repo, which runs this pipeline).
+#
+# SCOPES. `:tier_a` (Sources.license_urls: LICENSE_URLS for the selected backbone) is what the nightly checks: the
+# inputs of the published artifact. `:curation` (Sources::CURATION_TERMS_URLS)
+# pins the terms of inputs read only as build-time curation evidence (RIR
+# delegated stats, D-SRC-1); the tools that read them check that scope, and it
+# never blocks a publish that does not contain them. Curation pins carry
+# "scope": "curation" in pins.json; Tier A entries keep their original shape.
 
 require "digest"
 require_relative "env"
@@ -20,22 +27,36 @@ require_relative "sources"
 
 module OpenASNPipeline
   module LicenseGate
+    SCOPES = %i[tier_a curation].freeze
+
     module_function
 
     # Pins live in the DATA repo (they are provenance receipts for the
     # published data, and belong next to it) — resolved lazily.
     def pins_path = File.join(Env.licenses_dir, "pins.json")
 
-    def run(http: Http.new, offline: ENV["OFFLINE"] == "1")
+    # { source_id => spec } for the requested scope(s); spec gains :scope.
+    def specs(scope = :tier_a)
+      scopes = scope == :all ? SCOPES : [scope]
+      unknown = scopes - SCOPES
+      raise ArgumentError, "unknown license scope #{unknown.inspect}" if unknown.any?
+
+      out = {}
+      out.merge!(Sources.license_urls.transform_values { _1.merge(scope: :tier_a) }) if scopes.include?(:tier_a)
+      out.merge!(Sources::CURATION_TERMS_URLS.transform_values { _1.merge(scope: :curation) }) if scopes.include?(:curation)
+      out
+    end
+
+    def run(http: Http.new, offline: ENV["OFFLINE"] == "1", scope: :tier_a)
       if offline
-        Env.warn("license gate SKIPPED (offline mode) - never publish an offline build")
+        Env.warn("license gate (#{scope}) SKIPPED (offline mode) - never publish an offline build")
         return
       end
 
       pins = load_pins
       failures = []
 
-      Sources::LICENSE_URLS.each do |source_id, spec|
+      specs(scope).each do |source_id, spec|
         live_text = extract(http.get!(spec[:url]), spec[:extract], source_id)
         live_sha  = Digest::SHA256.hexdigest(live_text)
         pinned    = pins.dig(source_id, "sha256")
@@ -61,31 +82,39 @@ module OpenASNPipeline
     # human-readable text alongside. Only ever run this deliberately, inside
     # a reviewed PR that states why the license text changed.
     #
-    # only: source ids to (re-)pin (`rake licenses:pin ONLY=a,b`); every other
-    # existing pin and its .txt copy stays byte-for-byte untouched. Use it when
-    # ADDING a source, so the review is not asked to re-approve pins nobody
-    # re-read. nil (the default) re-pins everything, as before.
+    # only: an Array of source ids to (re-)pin; every other existing pin and
+    # its .txt copy is left byte-for-byte untouched. Use it when ADDING a
+    # source, so the review is not asked to re-approve pins nobody re-read.
+    # nil (the default) re-pins everything, as before.
     def pin!(http: Http.new, only: nil)
+      all = specs(:all)
       if only
-        unknown = only - Sources::LICENSE_URLS.keys
+        unknown = only - all.keys
         raise ArgumentError, "licenses:pin ONLY= names unknown source ids: #{unknown.join(', ')}" if unknown.any?
       end
+
       FileUtils.mkdir_p(Env.licenses_dir)
       pins = only ? load_pins : {}
-      Sources::LICENSE_URLS.each do |source_id, spec|
+      all.each do |source_id, spec|
         next if only && !only.include?(source_id)
 
         text = extract(http.get!(spec[:url]), spec[:extract], source_id)
-        pins[source_id] = {
-          "url" => spec[:url],
-          "extract" => spec[:extract].to_s,
-          "sha256" => Digest::SHA256.hexdigest(text),
-          "pinned_at" => Time.now.utc.iso8601
-        }
-        File.write(File.join(Env.licenses_dir, "#{source_id}.txt"), text)
+        pins[source_id] = pin_entry(spec, text)
+        File.binwrite(File.join(Env.licenses_dir, "#{source_id}.txt"), text)
         Env.log("pinned #{source_id} (#{pins[source_id]['sha256'][0, 12]}…)")
       end
       File.write(pins_path, JSON.pretty_generate(pins) + "\n")
+    end
+
+    def pin_entry(spec, text)
+      entry = {
+        "url" => spec[:url],
+        "extract" => spec[:extract].to_s,
+        "sha256" => Digest::SHA256.hexdigest(text),
+        "pinned_at" => Time.now.utc.iso8601
+      }
+      entry["scope"] = spec[:scope].to_s unless spec[:scope] == :tier_a
+      entry
     end
 
     def load_pins
@@ -100,6 +129,10 @@ module OpenASNPipeline
     # churn (stats tables, usage docs) can't trip the gate but any edit to
     # the grant or to the crucial "source files and generated output"
     # sentence does.
+    #
+    # APNIC/AFRINIC README-EXTENDED: section "2. CONDITIONS OF USE" up to the
+    # "3. STATISTICS FORMAT" heading (verified 2026-09-19), whitespace kept
+    # verbatim - a reworded grant must trip the gate.
     def extract(body, mode, source_id)
       case mode
       when :whole_file
@@ -118,6 +151,19 @@ module OpenASNPipeline
         Env.fail_stage!("#{source_id}: could not find the CC0 grant sentence - Wikidata:Copyright changed, INVESTIGATE") unless line
 
         line.chomp
+      when :wp_json_rendered_text
+        # RouteViews: WordPress REST rendering of the licence page. Tags are
+        # stripped and whitespace collapsed so only the words are pinned.
+        html = JSON.parse(body).dig("content", "rendered")
+        Env.fail_stage!("#{source_id}: licence JSON has no content.rendered - endpoint changed, INVESTIGATE") unless html.is_a?(String)
+
+        "#{html.gsub(/<[^>]+>/, ' ').gsub(/\s+/, ' ').strip}\n"
+      when :conditions_of_use_section
+        text = body.dup.force_encoding("UTF-8").scrub
+        m = text.match(/^(2\.[ \t]+CONDITIONS OF USE[ \t]*\r?\n.*?)^3\.[ \t]+STATISTICS FORMAT/m)
+        Env.fail_stage!("#{source_id}: could not extract CONDITIONS OF USE section - README structure changed, INVESTIGATE") unless m
+
+        m[1]
       else
         Env.fail_stage!("unknown license extract mode #{mode.inspect} for #{source_id}")
       end

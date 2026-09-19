@@ -17,14 +17,22 @@
 #       stamped WARN - the same machinery as the crosscheck drift gate
 #       (lib/drift_gate.rb), because G4 had the same deadlock shape.
 #       Skipped with a log line on the first build ever.
-#   G6. Org-names sidecar: sentinel ASNs resolve, and its entry count is
-#       drift-gated (LAYER_POLICY) against the previous build and weekly pins.
-#   G7. Per-ASN country (asn-categories.csv): sentinel ASNs carry their
-#       curated country, and the count of non-empty countries is drift-gated
-#       (LAYER_POLICY) like G6. D-SRC-2 (country).
 #   G5. Spot-check panel (spotchecks.yml) passes 100%. The panel is a
 #       tripwire, not gospel: update expectations only via reviewed PR with
 #       a reason (routing changes happen - e.g. an IP moving providers).
+#   G6. Org-names sidecar: sentinel ASNs resolve, and its entry count is
+#       drift-gated (LAYER_POLICY) against the previous build and weekly pins.
+#   G8. Per-ASN country (asn-categories.csv): sentinel ASNs carry their
+#       curated country, and the count of non-empty countries is drift-gated
+#       (LAYER_POLICY) like G6. D-SRC-2 (country). (Numbered after G7, the
+#       candidate gate, which kept its name from the exports work.)
+#   G7. The ASSEMBLED CANDIDATE is complete and internally consistent: every
+#       registered asset is still the bytes it was registered as, the
+#       manifest and SHA256SUMS describe exactly the registry (and never
+#       themselves), the export inventory equals what the dataset's export
+#       contract requires of this mode, and a native client can still
+#       resolve its own files out of the manifest. It runs after assembly
+#       and before any upload (PRD §15.1, §16.1).
 
 require "yaml"
 require "ipaddr"
@@ -33,6 +41,7 @@ require_relative "lib/binary"
 require_relative "lib/classifier"
 require_relative "lib/orgs"
 require_relative "lib/drift_gate"
+require_relative "publish"
 
 module OpenASNPipeline
   module Validate
@@ -69,6 +78,75 @@ module OpenASNPipeline
       artifacts
     end
 
+    # G7: the last gate before publication reads the candidate back from
+    # disk. Everything it checks was true when each stage produced its file;
+    # the point is that it is STILL true now, of the exact bytes an uploader
+    # would send.
+    def candidate!(registry:, manifest:, mode:, dir:)
+      registry.verify!
+
+      on_disk = JSON.parse(File.read(File.join(dir, "manifest.json")))
+      names = on_disk.fetch("files").map { |entry| entry.fetch("name") }
+      unless names == registry.payload_names
+        Env.fail_stage!("G7: manifest.json lists #{names.inspect} but the registry holds " \
+                        "#{registry.payload_names.inspect}")
+      end
+      overlap = names & ReleaseAssets::ENVELOPE_NAMES
+      unless overlap.empty?
+        Env.fail_stage!("G7: #{overlap.join(', ')} appears in manifest.files; an envelope file cannot hash itself")
+      end
+
+      on_disk.fetch("files").each do |entry|
+        asset = registry[entry.fetch("name")]
+        next if asset && asset.sha256 == entry.fetch("sha256") && asset.bytes == entry.fetch("bytes")
+
+        Env.fail_stage!("G7: manifest entry for #{entry['name']} does not describe the candidate file")
+      end
+
+      sums = File.read(File.join(dir, "SHA256SUMS"))
+      Env.fail_stage!("G7: SHA256SUMS does not match the registry") unless sums == registry.checksums
+      # Compare NAMES, not substrings: "fetch-manifest.json" ends with the
+      # envelope's name and is a perfectly ordinary payload.
+      listed = sums.lines.map { |line| line.split("  ", 2).last.to_s.chomp }
+      self_hashed = listed & ReleaseAssets::ENVELOPE_NAMES
+      unless self_hashed.empty?
+        Env.fail_stage!("G7: SHA256SUMS lists #{self_hashed.join(', ')}; it must list payloads only")
+      end
+
+      registry.require_exports!(mode.assets)
+      check_export_identities!(on_disk)
+      # An old native client must still find its three artifacts and nothing
+      # about the additive entries may stop it (PRD §15.3, test id U22).
+      Publish.native_client_view(on_disk)
+
+      Env.log("G7: candidate complete - #{registry.payloads.size} payloads " \
+              "(#{registry.exports.size} exports, mode #{mode.selected}) plus manifest.json and SHA256SUMS")
+      registry
+    end
+
+    # Every export entry must carry the identities this producer stamped into
+    # the file itself. A manifest that labeled an asset with a profile the
+    # bytes do not implement would be worse than no manifest at all.
+    def check_export_identities!(manifest)
+      manifest.fetch("files").each do |entry|
+        block = entry["export"] or next
+
+        {
+          "schema_version" => Export::Contract::SCHEMA_VERSION,
+          "schema_revision" => Export::Contract::SCHEMA_REVISION,
+          "classification_profile" => Export::Contract::CLASSIFICATION_PROFILE,
+          "lookup_policy_version" => Export::Contract::LOOKUP_POLICY_VERSION,
+          "scope" => Export::Contract::SCOPE,
+          "tier_b_included" => Export::Contract::TIER_B_INCLUDED
+        }.each do |key, expected|
+          next if block[key] == expected
+
+          Env.fail_stage!("G7: #{entry['name']} is labeled #{key}=#{block[key].inspect}, but this producer " \
+                          "emits #{expected.inspect}")
+        end
+      end
+    end
+
     # G6: the orgs sidecar must resolve well-known ASNs to plausible names,
     # and its entry count is drift-gated like the layer counts (D-GATE-1).
     # Since D-SRC-2 the names are CC0-only (org_names.txt + Wikidata), so the
@@ -102,7 +180,7 @@ module OpenASNPipeline
       )
     end
 
-    # G7: since D-SRC-2 (country) the `country` column is CC0-only
+    # G8: since D-SRC-2 (country) the `country` column is CC0-only
     # (asn_country.txt, then Wikidata). The sentinels come from the
     # hand-curated head of asn_country.txt, so a miss means that file failed
     # to load or lost its head, not an upstream blip. The count is drift-gated
@@ -113,12 +191,12 @@ module OpenASNPipeline
       countries = compiled[:countries] || {}
       COUNTRY_SENTINELS.each do |asn, cc|
         got = countries.dig(asn, "cc")
-        Env.fail_stage!("G7: country for AS#{asn} is #{got.inspect}, expected #{cc.inspect}") unless got == cc
+        Env.fail_stage!("G8: country for AS#{asn} is #{got.inspect}, expected #{cc.inspect}") unless got == cc
       end
 
       pins = baseline_stats.select { |p| p.stats["countries"] }
       DriftGate.enforce!(
-        gate: "G7",
+        gate: "G8",
         metric: "countries",
         now: countries.size,
         prev: previous_stats && previous_stats["countries"],
@@ -179,8 +257,12 @@ module OpenASNPipeline
         return
       end
 
+      # Reviewed baselines ride in the previous manifest (an acked step change
+      # re-anchors its own metric only - lib/drift_gate.rb REVIEWED BASELINES).
+      reviewed = DriftGate.reviewed_from(previous_stats)
       results = layers.map do |layer|
         DriftGate.enforce!(
+          reviewed: reviewed[layer],
           gate: "G4",
           metric: layer,
           now: current[layer], # nil (layer gone) reads as 0 -> -100% FAIL, see DriftGate.evaluate

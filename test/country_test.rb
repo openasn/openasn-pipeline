@@ -339,8 +339,8 @@ module OpenASNPipeline
     def test_country_stats_reach_the_manifest_shape
       stats = Publish.manifest_stats(PublishManifestStatsTest::ARTIFACTS, PublishManifestStatsTest::CROSSCHECK,
                                      org_stats: Publish.country_stats(
-                                       { countries: { 1 => { "cc" => "US", "source" => "override" } } },
-                                       { wikidata_country_stats: { "statements" => 3 } }
+                                       { countries: { 1 => { "cc" => "US", "source" => "override" } },
+                                         wikidata_country_stats: { "statements" => 3 } }
                                      ))
       assert_equal 1, stats[:countries]
       assert_equal({ "override" => 1, "wikidata" => 0 }, stats[:countries_by_source])
