@@ -38,9 +38,16 @@ module OpenASNPipeline
 
     module_function
 
-    def run(normalized, overrides: Overrides.load, http: Http.new, offline: ENV["OFFLINE"] == "1")
-      build_ts = Time.now.to_i
-      meta     = normalized[:asn_meta]
+    # `dest` and `build_ts` are injectable so a build can compile into the
+    # fresh directory it owns instead of a global one (PRD §15.1) and so the
+    # byte-identity test can fix the timestamp (PRD §19.3). Both defaults are
+    # the historical behavior exactly: DIST_DIR and Time.now. The returned
+    # paths are authoritative - no later stage reconstructs them from a
+    # constant.
+    def run(normalized, overrides: Overrides.load, http: Http.new, offline: ENV["OFFLINE"] == "1",
+            dest: DIST_DIR, build_ts: Time.now.to_i)
+      meta = normalized[:asn_meta]
+      FileUtils.mkdir_p(dest)
 
       flags_by_asn = build_flags(meta, overrides, normalized[:bad_asns])
 
@@ -49,9 +56,9 @@ module OpenASNPipeline
 
       fill_missing_override_asns!(base_v4, base_v6, overrides, flags_by_asn, http, offline)
 
-      v4_path = File.join(DIST_DIR, "openasn-ipv4.bin")
-      v6_path = File.join(DIST_DIR, "openasn-ipv6.bin")
-      orgs_path = File.join(DIST_DIR, "openasn-orgs.bin")
+      v4_path = File.join(dest, "openasn-ipv4.bin")
+      v6_path = File.join(dest, "openasn-ipv6.bin")
+      orgs_path = File.join(dest, "openasn-orgs.bin")
 
       Binary.write(v4_path, family: :ipv4, build_ts: build_ts,
                    base_rows: base_v4,
@@ -70,7 +77,7 @@ module OpenASNPipeline
               "#{normalized[:vpn_v4].length} vpn, #{normalized[:dc_v4].length} dc) | " \
               "ipv6 #{File.size(v6_path) / 1024}KB (#{base_v6.length} base)")
 
-      { build_ts: build_ts, v4_path: v4_path, v6_path: v6_path, orgs_path: orgs_path,
+      { build_ts: build_ts, dest: dest, v4_path: v4_path, v6_path: v6_path, orgs_path: orgs_path,
         base_v4: base_v4, base_v6: base_v6,
         flags_by_asn: flags_by_asn, overrides: overrides }
     end

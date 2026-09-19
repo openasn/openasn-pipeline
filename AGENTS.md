@@ -25,3 +25,11 @@ Hard rules (same as the data repo, enforced here):
 Dev loop: `ruby pipeline/run.rb` (full build), `OFFLINE=1` to iterate from
 cache, `rake test` for unit tests, `rake 'lookup[IP]'` to debug a verdict
 against build/dist artifacts.
+
+Export CI (`.github/workflows/exports.yml`, PRD 17.1) runs what `rake test`
+deliberately cannot: `rake exports:python_test` (sqlite.py's own suite, under
+the interpreter the release producer resolves), `rake exports:mmdb_test` (the
+Go tool, non-skippable), `rake 'exports:synthetic[DIR]'` +
+`exports:from_release` + `exports:validate` + `exports:candidate` (a whole
+release from made-up bytes, re-opened with independent readers), and
+`rake 'exports:reproducibility[DIR]'`. All offline, none can publish.
