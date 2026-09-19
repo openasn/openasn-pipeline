@@ -45,6 +45,16 @@ task "sources:rir" do
   puts JSON.pretty_generate(OpenASNPipeline::RirStats.build(offline: offline)[:stats])
 end
 
+desc "PROTOTYPE: Wikidata P3797 (CC0) ASN->item seed + coverage vs RIR holder clusters -> build/work/wikidata/ (not published)"
+task "sources:wikidata" do
+  require_relative "pipeline/lib/http"
+  require_relative "pipeline/lib/license_gate"
+  require_relative "pipeline/lib/wikidata_asn"
+  offline = ENV["OFFLINE"] == "1"
+  OpenASNPipeline::LicenseGate.run(offline: offline, scope: :curation) # the RIR files it joins against
+  puts JSON.pretty_generate(OpenASNPipeline::WikidataAsn.build(offline: offline).reject { |k, _| k == "conflict_asns" })
+end
+
 desc "Sibling candidates for data/overrides/ from RIR holder clusters (curation aid, writes build/work/candidates/*.rir-siblings.txt)"
 task "overrides:rir_siblings" do
   ruby "pipeline/tools/rir_siblings.rb"
