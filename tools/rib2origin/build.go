@@ -226,7 +226,7 @@ func ingestFile(path, dec string, agg *Aggregator, cfg *Config) (fileStats, *loc
 	l := newLocalStats()
 	var rec RIBRecord
 	var peerIDs []int
-	var peersSeen []Peer
+	peerGen := 0
 	for {
 		err := mr.Next(&rec)
 		if err == io.EOF {
@@ -236,8 +236,8 @@ func ingestFile(path, dec string, agg *Aggregator, cfg *Config) (fileStats, *loc
 			closeFn()
 			return st, l, err
 		}
-		if len(mr.Peers) != len(peersSeen) || peerIDs == nil {
-			peersSeen = mr.Peers
+		if mr.PeerGen != peerGen {
+			peerGen = mr.PeerGen
 			peerIDs = agg.PeerIDs(mr.Peers)
 		}
 		agg.Add(&rec, mr.Peers, peerIDs, l, cfg)

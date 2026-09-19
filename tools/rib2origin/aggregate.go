@@ -206,6 +206,7 @@ type ResolveStats struct {
 	Kept           int `json:"prefixes_kept"`
 	DroppedLowVis  int `json:"dropped_below_min_peers"`
 	DroppedASSet   int `json:"dropped_as_set_only"`
+	DroppedNoOrig  int `json:"dropped_no_usable_origin"`
 	MOAS           int `json:"moas_prefixes_kept"`
 	Ties           int `json:"visibility_ties_broken_by_lowest_asn"`
 	MinorityShare  int `json:"kept_where_winner_below_half_of_prefix_peers"`
@@ -238,6 +239,16 @@ func (a *Aggregator) Resolve(cfg *Config) ([]Resolved, []Resolved, []Resolved, R
 				cands = append(cands, OriginVis{ASN: o.asn, Vis: o.peers.count()})
 			}
 			if len(cands) == 0 {
+				// Two different causes (RB-2): paths ending in a multi-member
+				// AS_SET, or every path rejected at ingestion (bogon origin,
+				// no AS_PATH), which leaves no origins at all. The first
+				// version reported both as as_set_only (520 of 566 on
+				// 2026-09-18 were really bogon-origin-only).
+				if len(pa.origins) == 0 {
+					st.DroppedNoOrig++
+					dropped = append(dropped, Resolved{Prefix: pfx, Reason: "no_usable_origin"})
+					continue
+				}
 				st.DroppedASSet++
 				dropped = append(dropped, Resolved{Prefix: pfx, TotalVis: union.count(), Reason: "as_set_only"})
 				continue

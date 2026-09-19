@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net/netip"
+	"os"
 	"testing"
 )
 
@@ -231,6 +232,119 @@ func TestFilters(t *testing.T) {
 	for asn, bad := range map[uint32]bool{0: true, 23456: true, 64512: true, 65535: true, 4200000000: true, 13335: false, 131072: false, 401308: false} {
 		if (originRejectReason(asn) != "") != bad {
 			t.Errorf("AS%d: reject=%v", asn, !bad)
+		}
+	}
+}
+
+// RB-2: a prefix whose every path was rejected at ingestion (bogon origin)
+// is "no_usable_origin", not "as_set_only"; a real AS_SET-only prefix keeps
+// its label. Also: visibility counts peer ASes, not sessions.
+func TestDropReasonsAndPeerASCounting(t *testing.T) {
+	var stream []byte
+	// Peers 0 and 1 are two sessions of the same AS 3356.
+	stream = append(stream, mrtRecord(subPeerIndexTable, peerIndex(3356, 3356, 174))...)
+	stream = append(stream, mrtRecord(subRIBIPv4Unicast, ribV4("41.111.128.0/17", map[uint16][]byte{
+		0: asPathAttr(seq(3356, 36947, 65536)),
+		2: asPathAttr(seq(174, 36947, 65536)),
+	}))...)
+	stream = append(stream, mrtRecord(subRIBIPv4Unicast, ribV4("9.9.0.0/16", map[uint16][]byte{
+		0: asPathAttr(seq(3356), set(100, 200)),
+		2: asPathAttr(seq(174), set(100, 200)),
+	}))...)
+	stream = append(stream, mrtRecord(subRIBIPv4Unicast, ribV4("7.7.7.0/24", map[uint16][]byte{
+		0: asPathAttr(seq(3356, 999)),
+		1: asPathAttr(seq(3356, 999)),
+	}))...)
+	cfg := Config{MinPeers: 2, V4MinLen: 8, V4MaxLen: 24, V6MinLen: 16, V6MaxLen: 48}
+	agg := NewAggregator()
+	mr := NewReader(bytes.NewReader(stream))
+	l := newLocalStats()
+	var rec RIBRecord
+	for {
+		err := mr.Next(&rec)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		agg.Add(&rec, mr.Peers, agg.PeerIDs(mr.Peers), l, &cfg)
+	}
+	v4, _, dropped, st := agg.Resolve(&cfg)
+	if len(v4) != 0 {
+		t.Fatalf("nothing should be kept: %+v", v4)
+	}
+	got := map[string]string{}
+	for _, d := range dropped {
+		got[d.Prefix.String()] = d.Reason
+	}
+	want := map[string]string{
+		"41.111.128.0/17": "no_usable_origin",
+		"9.9.0.0/16":      "as_set_only",
+		"7.7.7.0/24":      "below_min_peers", // two sessions, one peer AS
+	}
+	for p, r := range want {
+		if got[p] != r {
+			t.Errorf("%s: reason %q, want %q", p, got[p], r)
+		}
+	}
+	if st.DroppedASSet != 1 || st.DroppedNoOrig != 1 || st.DroppedLowVis != 1 {
+		t.Errorf("stats: %+v", st)
+	}
+}
+
+// Truncated streams must fail loudly, never end as a clean (thinner) EOF.
+func TestTruncatedStreamIsAnError(t *testing.T) {
+	var stream []byte
+	stream = append(stream, mrtRecord(subPeerIndexTable, peerIndex(3356, 174))...)
+	stream = append(stream, mrtRecord(subRIBIPv4Unicast, ribV4("8.8.8.0/24", map[uint16][]byte{
+		0: asPathAttr(seq(3356, 15169)),
+		1: asPathAttr(seq(174, 15169)),
+	}))...)
+	for cut := 1; cut < 30; cut++ {
+		mr := NewReader(bytes.NewReader(stream[:len(stream)-cut]))
+		var rec RIBRecord
+		var err error
+		for err == nil {
+			err = mr.Next(&rec)
+		}
+		if err == io.EOF {
+			t.Fatalf("cut %d bytes: truncated stream ended in a clean EOF", cut)
+		}
+	}
+}
+
+// RB-3: a second PEER_INDEX_TABLE of the same size (e.g. two dumps
+// concatenated) must re-map peer ids; the first version compared only the
+// table length and kept attributing routes to the previous table's peer ASes.
+func TestSecondPeerIndexTableOfSameSizeIsRemapped(t *testing.T) {
+	var stream []byte
+	stream = append(stream, mrtRecord(subPeerIndexTable, peerIndex(3356, 174))...)
+	stream = append(stream, mrtRecord(subRIBIPv4Unicast, ribV4("8.8.8.0/24", map[uint16][]byte{
+		0: asPathAttr(seq(3356, 15169)),
+	}))...)
+	stream = append(stream, mrtRecord(subPeerIndexTable, peerIndex(2914, 6939))...)
+	stream = append(stream, mrtRecord(subRIBIPv4Unicast, ribV4("8.8.4.0/24", map[uint16][]byte{
+		0: asPathAttr(seq(2914, 15169)),
+		1: asPathAttr(seq(6939, 15169)),
+	}))...)
+	dir := t.TempDir()
+	path := dir + "/two-tables.mrt"
+	if err := os.WriteFile(path, stream, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{MinPeers: 1, V4MinLen: 8, V4MaxLen: 24, V6MinLen: 16, V6MaxLen: 48}
+	agg := NewAggregator()
+	if _, _, err := ingestFile(path, "go", agg, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if n := agg.NumPeerASes(); n != 4 {
+		t.Errorf("distinct peer ASes = %d, want 4 (3356, 174, 2914, 6939)", n)
+	}
+	v4, _, _, _ := agg.Resolve(&cfg)
+	for _, r := range v4 {
+		if r.Prefix.String() == "8.8.4.0/24" && r.OriginVis != 2 {
+			t.Errorf("8.8.4.0/24 seen by %d peer ASes, want 2", r.OriginVis)
 		}
 	}
 }

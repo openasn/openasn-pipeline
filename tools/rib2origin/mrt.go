@@ -63,6 +63,9 @@ type Reader struct {
 	hdr   [12]byte
 	buf   []byte
 	Peers []Peer
+	// PeerGen counts PEER_INDEX_TABLEs read, so callers re-map peer ids
+	// whenever a new table arrives, even one of the same size (RB-3).
+	PeerGen int
 
 	// Counters for the stats report (skipped subtypes are not errors: RIBs
 	// may carry multicast or RIB_GENERIC records the backbone ignores).
@@ -172,6 +175,7 @@ func (m *Reader) parsePeerIndex(b []byte) error {
 		peers = append(peers, Peer{AS: as, Addr: addr})
 	}
 	m.Peers = peers
+	m.PeerGen++
 	return nil
 }
 
