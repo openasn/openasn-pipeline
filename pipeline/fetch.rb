@@ -26,6 +26,8 @@ module OpenASNPipeline
       x4b_dc: "x4bnet/datacenter-ipv4.txt",
       x4b_vpn_asn: "x4bnet/input-vpn-ASN.txt",
       x4b_dc_asn: "x4bnet/input-datacenter-ASN.txt",
+      x4b_vpn_manual: "x4bnet/input-vpn-ips-Manual.txt",
+      x4b_dc_manual: "x4bnet/input-datacenter-ips-Manual.txt",
       bad_asn: "brianhama/bad-asn-list.csv"
     }.freeze
 
@@ -46,6 +48,17 @@ module OpenASNPipeline
       paths[:x4b_dc]      = http.fetch(Sources::X4B_DC_URL, KEYS[:x4b_dc], offline: offline)
       paths[:x4b_vpn_asn] = http.fetch(Sources::X4B_VPN_ASN_URL, KEYS[:x4b_vpn_asn], offline: offline)
       paths[:x4b_dc_asn]  = http.fetch(Sources::X4B_DC_ASN_URL, KEYS[:x4b_dc_asn], offline: offline)
+      # No size floor below for the Manual.txt files: a comment-only file is
+      # legitimate (input/datacenter/ips/Manual.txt is exactly that today).
+      paths[:x4b_vpn_manual] = http.fetch(Sources::X4B_VPN_MANUAL_URL, KEYS[:x4b_vpn_manual], offline: offline)
+      paths[:x4b_dc_manual]  = http.fetch(Sources::X4B_DC_MANUAL_URL, KEYS[:x4b_dc_manual], offline: offline)
+      # Third-party files, fetched only to be SUBTRACTED from the dc overlay.
+      # http.fetch, not fetch_optional: a transient failure must fall back to
+      # yesterday's copy (over-subtracting is harmless) or fail loudly -
+      # never silently skip the subtraction and republish the feed.
+      paths[:x4b_dc_feeds] = Sources::X4B_DC_FEEDS.map do |rel, url|
+        http.fetch(url, "x4bnet/feeds/#{rel.tr('/', '-')}", offline: offline)
+      end
 
       paths[:bad_asn] = http.fetch(Sources::BAD_ASN_URL, KEYS[:bad_asn], offline: offline)
 
