@@ -26,6 +26,7 @@ module OpenASNPipeline
   module RouteViews
     MIN_COLLECTORS = 7
     MIN_RIB_BYTES  = 5_000_000
+    FETCH_THREADS  = 4
     TOOL_DIR = File.expand_path("../../tools/rib2origin", __dir__)
 
     module_function
@@ -36,18 +37,37 @@ module OpenASNPipeline
     def build(http:, offline:)
       slot = Sources.routeviews_slot
       Env.log("routeviews: RIB slot #{slot} UTC, #{Sources::ROUTEVIEWS_COLLECTORS.size} collectors")
-      ribs = {}
-      Sources::ROUTEVIEWS_COLLECTORS.each do |c|
-        url = Sources.routeviews_rib_url(c, slot)
-        begin
-          path = http.fetch(url, cache_key(c), offline: offline)
-        rescue StageFailure, StandardError => e
-          Env.warn("routeviews: #{c} unavailable (#{e.message.lines.first&.strip}) - skipping this collector")
-          next
+      # Fetched FETCH_THREADS at a time: one archive stream runs at roughly
+      # 1 MB/s from a European host (measured 2026-09-19), so ten sequential
+      # RIBs would take ~15 min. Still a fixed list of named files, never a
+      # crawl (the archive's robots.txt disallows crawlers).
+      queue = Queue.new
+      Sources::ROUTEVIEWS_COLLECTORS.each { |c| queue << c }
+      found = {}
+      lock = Mutex.new
+      Array.new(FETCH_THREADS) do
+        Thread.new do
+          while (c = begin
+            queue.pop(true)
+          rescue ThreadError
+            nil
+          end)
+            url = Sources.routeviews_rib_url(c, slot)
+            begin
+              path = http.fetch(url, cache_key(c), offline: offline)
+            rescue StandardError => e
+              Env.warn("routeviews: #{c} unavailable (#{e.message.lines.first&.strip}) - skipping this collector")
+              next
+            end
+            lock.synchronize { found[c] = path }
+          end
         end
+      end.each(&:join)
+      # Keep the configured collector order so builds are reproducible.
+      ribs = Sources::ROUTEVIEWS_COLLECTORS.filter_map { |c| [c, found[c]] if found[c] }.to_h
+      ribs.each do |c, path|
         size = File.size(path)
         Env.fail_stage!("routeviews: #{c} RIB suspiciously small: #{size} bytes (< #{MIN_RIB_BYTES})") if size < MIN_RIB_BYTES
-        ribs[c] = path
       end
       if ribs.size < MIN_COLLECTORS
         Env.fail_stage!("routeviews: only #{ribs.size} of #{Sources::ROUTEVIEWS_COLLECTORS.size} collector RIBs usable " \
