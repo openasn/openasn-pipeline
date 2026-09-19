@@ -1,0 +1,31 @@
+{
+  "fixture_version": 1,
+  "description": "Addresses are offsets from 1.0.0.0. Inclusive ranges. Entire expected effective interval stream, including overlay-only coverage; no implicit default covering gaps.",
+  "ip_version": 4,
+  "origin": "1.0.0.0",
+  "orgs": {"100": "Access A", "200": "Host B", "300": "Gateway C"},
+  "base": [
+    {"start":0,"end":9,"asn":100,"flags":65},
+    {"start":10,"end":19,"asn":200,"flags":98},
+    {"start":20,"end":29,"asn":300,"flags":2115}
+  ],
+  "vpn": [[8,12],[40,41]],
+  "dc": [[5,15],[35,40]],
+  "relay": [],
+  "expected": [
+    {"start":0,"end":4,"asn":100,"flags":65,"vpn_range":false,"datacenter_range":false,"core_verdict":"residential_isp","core_sources":["asn_category"]},
+    {"start":5,"end":7,"asn":100,"flags":65,"vpn_range":false,"datacenter_range":true,"core_verdict":"hosting","core_sources":["x4b_dc"]},
+    {"start":8,"end":9,"asn":100,"flags":65,"vpn_range":true,"datacenter_range":true,"core_verdict":"vpn","core_sources":["x4b_vpn"]},
+    {"start":10,"end":12,"asn":200,"flags":98,"vpn_range":true,"datacenter_range":true,"core_verdict":"vpn","core_sources":["x4b_vpn"]},
+    {"start":13,"end":15,"asn":200,"flags":98,"vpn_range":false,"datacenter_range":true,"core_verdict":"hosting","core_sources":["x4b_dc"]},
+    {"start":16,"end":19,"asn":200,"flags":98,"vpn_range":false,"datacenter_range":false,"core_verdict":"hosting","core_sources":["asn_category"]},
+    {"start":20,"end":29,"asn":300,"flags":2115,"vpn_range":false,"datacenter_range":false,"core_verdict":"enterprise_gateway","core_sources":["asn_enterprise_gw"]},
+    {"start":35,"end":39,"asn":null,"flags":0,"vpn_range":false,"datacenter_range":true,"core_verdict":"hosting","core_sources":["x4b_dc"]},
+    {"start":40,"end":40,"asn":null,"flags":0,"vpn_range":true,"datacenter_range":true,"core_verdict":"vpn","core_sources":["x4b_vpn"]},
+    {"start":41,"end":41,"asn":null,"flags":0,"vpn_range":true,"datacenter_range":false,"core_verdict":"vpn","core_sources":["x4b_vpn"]}
+  ],
+  "miss_offsets": [-1,30,31,32,33,34,42],
+  "expected_effective_rows": 10,
+  "expected_covered_addresses": 37,
+  "expected_overlay_only_addresses": 7
+}

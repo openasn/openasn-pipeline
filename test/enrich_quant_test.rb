@@ -122,6 +122,38 @@ module OpenASNPipeline
         assert_equal 1, rows[396982]["prefixes_v4"]
       end
 
+      # Regression (2026-09-19): nested more-specifics were summed on top of their covering
+      # aggregate (Orange Egypt AS37069 reported 13.26M IPv4 for 4.51M unique addresses).
+      def test_prefixes_counts_overlapping_space_once_per_asn
+        rows = Prefixes.tally([
+          "10.0.0.0\t16\t64500",      # aggregate: 65,536
+          "10.0.1.0\t24\t64500",      # inside the /16 -> adds nothing
+          "10.0.2.0\t23\t64500",      # inside the /16 -> adds nothing
+          "10.0.2.0\t24\t64500",      # inside the /23 too
+          "10.1.0.0\t24\t64500",      # adjacent-but-disjoint -> +256
+          "10.1.0.0\t24\t64500",      # duplicate line -> adds nothing
+          "10.0.5.0\t24\t64501",      # other origin inside 64500's /16: counts for 64501 only
+          "10.0.9.0\t24\t64500_64501", # MOAS inside the /16: +0 for 64500, +256 for 64501
+          "2001:db8::\t32\t64500",
+          "2001:db8:1::\t48\t64500",  # inside the /32 -> adds nothing
+          "2001:db9::\t32\t64500",    # disjoint -> doubles
+        ].join("\n"))
+        a = rows[64500]
+        assert_equal 7, a["prefixes_v4"]                    # prefix COUNTS are unchanged
+        assert_equal 3, a["prefixes_v6"]
+        assert_equal 65_536 + 256, a["ipv4_addresses"]
+        assert_equal (2 * 2**96).to_s, a["ipv6_addresses"]
+        assert_equal 512, rows[64501]["ipv4_addresses"]
+        assert_equal 2, rows[64501]["prefixes_v4"]
+        assert_equal "0", rows[64501]["ipv6_addresses"]
+      end
+
+      def test_prefixes_union_size_merges_overlaps_and_adjacency
+        assert_equal 0, Prefixes.union_size([])
+        assert_equal 30, Prefixes.union_size([[1, 10], [5, 20], [21, 30], [3, 4]])
+        assert_equal 20, Prefixes.union_size([[1, 10], [21, 30]])
+      end
+
       def test_record_merges_all_sources_with_provenance
         rows = {
           rir:      RirStats.parse(RIR_ARIN)[3356],

@@ -53,6 +53,41 @@ Artifacts are rebuilt and mirrored here **nightly**.
 | `manifest.json` | build id, per-file SHA-256, full source provenance |
 | `fetch-manifest.json` | the Tier B recipe (sources your server fetches directly — Tor exits, cloud ranges) |
 | `ATTRIBUTION.md` / `SHA256SUMS` | credits and checksums |
+| `openasn.sqlite.gz` | the same data as one queryable SQLite database (gzipped; `openasn.sqlite` once decompressed) |
+| `openasn.csv.gz` | the same data as one range-per-row CSV (gzipped) |
+| `openasn.mmdb` | the same data as a MaxMind-format database, read by any MMDB reader |
+
+This mirror carries exactly the files of the corresponding GitHub release,
+listed in that release's `manifest.json`. Nothing is assembled by hand
+here. The three portable exports are mirrored from the night the dataset's
+[export contract](https://github.com/openasn/openasn/blob/main/export-contract.json)
+requires them; the binary artifacts and the CSV table above have shipped
+since the first release.
+
+### What the portable exports contain (and what they do not)
+
+They are a different **representation** of the same build, not a different
+dataset, and their scope is deliberately narrower than a full client:
+
+- **Tier A only.** Everything in them comes from the redistributable
+  upstreams compiled into the release. The Tier B overlays a client fetches
+  for itself (Tor exit list, cloud provider ranges: see `fetch-manifest.json`)
+  are **not** included, so a client with Tier B enabled can legitimately
+  return a stronger verdict than these files do.
+- **One documented classification profile,** `core-v1`, and one lookup
+  policy, version 1. Both are stamped inside every file and in its manifest
+  entry, so a consumer can check what it is reading instead of inferring it.
+- **Row-level identity across formats.** SQLite, CSV and MMDB carry the same
+  coalesced ranges with the same fields; the byte-exact rules, the
+  special-address policy (`::1`, private space, CGNAT) and the update
+  protocol are specified in
+  [EXPORT_FORMATS.md](https://github.com/openasn/openasn/blob/main/EXPORT_FORMATS.md).
+
+One caveat worth reading before using the MMDB file: a combined IPv4+IPv6
+MMDB stores IPv4 inside `::/96`, so a raw reader resolves the IPv4 record for
+an `::a.b.c.d` literal, and `::ffff:a.b.c.d` returns no data because IPv4
+aliasing is deliberately disabled. Normalize mapped addresses before lookup
+(EXPORT_FORMATS.md §6.4).
 
 ## Quick look
 
@@ -62,6 +97,20 @@ import pandas as pd
 df = pd.read_csv("asn-categories.csv")
 df[df.category == "vpn_provider"].head(20)
 df.groupby("category").size().sort_values(ascending=False)
+```
+
+Range lookups with no client library at all, straight out of the SQLite
+export. `v4` is keyed by the range start, so you take the one row that starts
+at or before the address and then check that it actually reaches it. Ranges
+do not cover every address, so the `end >= :ip` test is what makes a gap
+return nothing instead of returning the previous range:
+
+```sql
+-- 8.8.8.8 = 134744072
+SELECT * FROM (
+  SELECT * FROM v4 WHERE start <= 134744072 ORDER BY start DESC LIMIT 1
+) AS candidate
+WHERE end >= 134744072;
 ```
 
 For microsecond IP lookups use the binary artifacts with a client —

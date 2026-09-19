@@ -35,6 +35,9 @@ module OpenASNPipeline
       @cache_dir  = cache_dir
       @state_path = File.join(cache_dir, "http-state.json")
       @state      = load_state
+      # #fetch may run on several threads (RouteViews pulls its RIBs in
+      # parallel); the state hash and its JSON file are the shared parts.
+      @state_lock = Mutex.new
     end
 
     # Fetch `url` into the cache under `key` (a relative filename like
@@ -67,13 +70,16 @@ module OpenASNPipeline
           path
         when Net::HTTPSuccess
           write_atomically(path, response.body)
-          @state[key] = StateEntry.new(
+          entry = StateEntry.new(
             etag: response["etag"],
             last_modified: response["last-modified"],
             fetched_at: Time.now.utc.iso8601,
             sha256: Digest::SHA256.hexdigest(response.body)
           )
-          save_state
+          @state_lock.synchronize do
+            @state[key] = entry
+            save_state
+          end
           Env.log("fetch #{key}: 200 (#{human_size(response.body.bytesize)})")
           path
         else
@@ -134,6 +140,18 @@ module OpenASNPipeline
       end
     rescue StandardError
       File.exist?(path) ? path : nil
+    end
+
+    # Where `key` lives in the cache (no fetch, no mkdir).
+    def path_for(key) = File.join(@cache_dir, key)
+
+    # Drops a cached file and its conditional-GET state (RouteViews keeps one
+    # RIB per slot and prunes the rest, lib/routeviews.rb).
+    def forget(key)
+      FileUtils.rm_f(path_for(key))
+      @state_lock.synchronize do
+        save_state if @state.delete(key)
+      end
     end
 
     def fetched_at(key) = @state[key]&.fetched_at

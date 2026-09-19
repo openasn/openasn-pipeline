@@ -104,7 +104,8 @@ module OpenASNPipeline
         now: hosting.size,
         prev: previous_stats && previous_stats["hosting_asns"],
         baselines: DriftGate.baselines_from(baseline_stats) { |s| s["hosting_asns"] },
-        policy: HOSTING_POLICY
+        policy: HOSTING_POLICY,
+        reviewed: DriftGate.reviewed_from(previous_stats)["hosting_asns"]
       )
 
       # Uncovered reference ASNs are exactly the candidates for

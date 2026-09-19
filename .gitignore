@@ -7,3 +7,11 @@
 /vendor/bundle/
 /coverage/
 *.gem
+# `go build ./...` inside tools/mmdbwriter drops the binary next to its source;
+# the tool is compiled into build/work/ by `rake exports:mmdb_test`.
+/tools/mmdbwriter/mmdbwriter
+# Python bytecode left behind by sqlite.py and its test suite. The writer is
+# a build tool run by absolute path, never an installed package, so nothing
+# here is output anybody imports.
+__pycache__/
+*.pyc

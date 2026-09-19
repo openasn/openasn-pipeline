@@ -18,11 +18,23 @@ require_relative "wikidata_names"
 
 module OpenASNPipeline
   module Sources
-    # --- sapics/ip-location-db (origin-asn): the IP->ASN backbone ------------
-    # PDDL v1.0 ("free use without attribution", per their README license
-    # section). Compiled by sapics from RIR delegated stats + RouteViews/RIPE
-    # RIS BGP data, deliberately avoiding RIR WHOIS - the same licensing
-    # discipline this project needs.
+    # --- sapics/ip-location-db (origin-asn): LEGACY backbone ------------------
+    # RETIRED as the default by D-SRC-2 (backbone) (coordinator ruling CD-12,
+    # 2026-09-19); still selectable with OPENASN_BACKBONE=sapics so the
+    # switchover can be rolled back without a code change. Removable in a
+    # follow-up once the RouteViews backbone has published cleanly for a few
+    # weeks: delete these constants, SAPICS_LICENSE/SAPICS_CATALOG,
+    # resolve_sapics_urls, the sapics branch of fetch.rb and publish.rb's
+    # "sapics-origin-asn" fetch keys.
+    #
+    # Why retired: sapics labels its table PDDL v1.0, but it is compiled from
+    # RouteViews + RIPE RIS BGP data and fills unrouted space from RIR
+    # delegated stats (P4-L audit; P4-B measured 10.8% of its v4 and 59.8%
+    # of its v6 space as RIR-stats fill). An aggregator's relabel is not a
+    # grant from the authority, so it fails README "Legal design" rule 1.
+    # Its licence pin is dropped from data/licenses/pins.json, so a sapics
+    # build FAILS the licence gate ("no pin recorded") until someone re-pins
+    # it in a reviewed PR - rolling back is a deliberate act.
     #
     # GOTCHA (2026-06-18): sapics changed their release URL scheme once
     # already. We therefore RESOLVE the asset URLs from their README table at
@@ -34,6 +46,52 @@ module OpenASNPipeline
       "origin-asn-ipv4-num.csv" => "https://github.com/sapics/ip-location-db/releases/download/latest/origin-asn-ipv4-num.csv",
       "origin-asn-ipv6-num.csv" => "https://github.com/sapics/ip-location-db/releases/download/latest/origin-asn-ipv6-num.csv"
     }.freeze
+
+    # --- RouteViews (University of Oregon): raw BGP RIBs -> our own backbone --
+    # THE DEFAULT IP->ASN backbone (data-repo DECISIONS.md D-SRC-2 (backbone);
+    # coordinator rulings CD-5 and CD-12, 2026-09-19). Measured against
+    # sapics on the same day: origin agreement 98.94% v4 / 97.45% v6 where
+    # both cover, compiled verdicts 99.81% identical, spot panel green.
+    #
+    # Why: sapics origin-asn is itself compiled from RouteViews + RIPE RIS
+    # (+ RIR stats for unrouted space) and relabelled PDDL, so it fails the
+    # "aggregators never qualify" invariant (P4-L audit). Deriving
+    # prefix->origin ourselves from RouteViews only removes the aggregator
+    # and the RIPE RIS dependency (EU database right, revocable permission).
+    #
+    # Terms (verified 2026-09-19, docs/enrichment/research/parts/
+    # P4-B-routeviews-terms-2026-09-19.jsonl): "RouteViews Data" is CC BY 4.0
+    # with attribution-type requests (credit + link, logo, boilerplate) and a
+    # revocation clause conditioned on missing attribution or "abuse". The
+    # published table holds only prefix->origin facts recomputed by our code
+    # (tools/rib2origin); ATTRIBUTION.md credits RouteViews in their
+    # prescribed words regardless.
+    #
+    # GOTCHAS: archive.routeviews.org's robots.txt is "Disallow: /" - we fetch
+    # a fixed list of named files once per build and never crawl directory
+    # listings. RIBs are written every 2h (00,02,...,22 UTC) and appear some
+    # minutes after the slot; route-views2 lives at the archive ROOT
+    # (/bgpdata/...), every other collector under /<collector>/bgpdata/...
+    ROUTEVIEWS_ARCHIVE = "https://archive.routeviews.org"
+    # Picked for geography (US west/east, UK, DE, ZA, SG, AU, BR, JP) plus the
+    # v6-focused route-views6. Measured on the 2026-09-18 20:00 slot: these 10
+    # = 186 distinct peer ASes, 852 MB; adding 6 more (rv3/4/5, amsix,
+    # chicago, isc) = 256 peer ASes, 1.33 GB, but v4 coverage moved only
+    # +0.02 pt and origin agreement +0.02 pt, so they stay out.
+    ROUTEVIEWS_COLLECTORS = %w[
+      route-views2 route-views.eqix route-views.linx decix.fra route-views.napafrica
+      route-views.sg route-views.sydney ix-br.gru route-views.wide route-views6
+    ].freeze
+    # The WordPress JSON rendering of the licence page: same text as
+    # https://www.routeviews.org/routeviews/licenses/ without the theme's
+    # markup, so theme churn cannot trip the gate (verified: identical bytes
+    # on repeated fetches, 2026-09-19). Text is tag-stripped before hashing.
+    ROUTEVIEWS_LICENSE_URL = "https://www.routeviews.org/routeviews/wp-json/wp/v2/pages/45927?_fields=content"
+
+    # First entry is the default (OPENASN_BACKBONE unset or empty).
+    BACKBONES = %w[routeviews sapics].freeze
+    ROUTEVIEWS_LICENSE = { url: ROUTEVIEWS_LICENSE_URL, extract: :wp_json_rendered_text }.freeze
+    ROUTEVIEWS_CATALOG = { id: "routeviews", url: "https://www.routeviews.org/", license: "CC-BY-4.0" }.freeze
 
     # --- ipverse/as-metadata: ASN -> country/category/role --------------------
     # CC0 1.0 (LICENSE pinned below). Its `description` field is NOT
@@ -63,6 +121,14 @@ module OpenASNPipeline
     # (source files and generated output)" - the wording that makes X4B
     # redistributable when most aggregated lists are not (quote pinned in data/licenses/).
     #
+    # BUT the generated output also merges third-party feeds X4B does not own
+    # (Apple Private Relay, Mullvad, PIA, Proton - all Tier B for us). The
+    # published output/ files are therefore only an UPPER BOUND: normalize.rb
+    # keeps vpn ranges only where X4B's first-party inputs (ASN.txt expanded
+    # against our backbone, plus ips/Manual.txt) justify them, and strips the
+    # named third-party file from the datacenter list. Rationale and
+    # measurements: lib/x4b_first_party.rb, data-repo DECISIONS.md D-SRC-3.
+    #
     # GOTCHA: the legacy root ipv4.txt path was REMOVED in 2026 (it broke
     # MISP's generator which still hardcodes it). Only output/... paths are
     # stable. IPv4 only - X4B publishes no IPv6; v6 VPN signal comes from
@@ -70,9 +136,22 @@ module OpenASNPipeline
     X4B_VPN_URL = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt"
     X4B_DC_URL  = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt"
     # Hand-curated ASN input files (first-party curation, MIT) - seeds for
-    # data/overrides/ and the crosscheck reference set.
+    # data/overrides/, the crosscheck reference set, and the first-party
+    # restriction of the overlays above.
     X4B_VPN_ASN_URL = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/vpn/ASN.txt"
     X4B_DC_ASN_URL  = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/datacenter/ASN.txt"
+    # Hand-curated netblocks (first-party, MIT; "Comment description
+    # manditory" per the file header). The ONLY files under input/*/ips/ that
+    # are first-party - every sibling there is a third-party feed.
+    X4B_VPN_MANUAL_URL = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/vpn/ips/Manual.txt"
+    X4B_DC_MANUAL_URL  = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/datacenter/ips/Manual.txt"
+    # Third-party feed files X4B merges into output/datacenter/ipv4.txt. Read
+    # ONLY to subtract them (D-CUR-1 consultation; never republished). No X4B
+    # workflow writes to input/datacenter/ips/ today - if one ever does, add
+    # its file here (lib/x4b_first_party.rb explains why dc is a blacklist).
+    X4B_DC_FEEDS = {
+      "input/datacenter/ips/protonvpn.txt" => "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/datacenter/ips/protonvpn.txt"
+    }.freeze
 
     # --- Wikidata P3797: ASN -> operator item label (CC0) --------------------
     # The CC0 half of the published org names. lib/wikidata_names.rb holds the
@@ -93,19 +172,19 @@ module OpenASNPipeline
     # (MaxMind Dec 2019). Expected hashes live in data/licenses/pins.json;
     # human-readable copies in data/licenses/*.txt.
     #
-    # Two sources have no standalone LICENSE file (verified 2026-07-04):
-    #   * sapics: license is declared in origin-asn/SOURCES.md (first line is
-    #     the PDDL statement) - we pin that whole file.
+    # Three sources have no standalone LICENSE file:
+    #   * RouteViews: the terms are a WordPress page; we pin the tag-stripped
+    #     text of its JSON rendering (ROUTEVIEWS_LICENSE_URL, 2026-09-19).
+    #   * sapics (LEGACY, OPENASN_BACKBONE=sapics only - see license_urls):
+    #     license is declared in origin-asn/SOURCES.md (first line is the
+    #     PDDL statement) - we pin that whole file (verified 2026-07-04).
     #   * X4BNet: MIT lives in README.md under a "# License" heading, with the
     #     load-bearing sentence extending it to "the list itself (source files
     #     and generated output)". We pin just that extracted section so
     #     unrelated README churn (stats, docs) doesn't trip the gate, but any
     #     edit to the grant itself does. Extraction: license_gate.rb.
     LICENSE_URLS = {
-      "sapics-origin-asn" => {
-        url: "https://raw.githubusercontent.com/sapics/ip-location-db/main/origin-asn/SOURCES.md",
-        extract: :whole_file
-      },
+      "routeviews" => ROUTEVIEWS_LICENSE,
       "ipverse-as-metadata" => {
         url: "https://raw.githubusercontent.com/ipverse/as-metadata/master/LICENSE",
         extract: :whole_file
@@ -130,11 +209,49 @@ module OpenASNPipeline
         extract: :wikidata_cc0
       }
     }.freeze
+    SAPICS_LICENSE = {
+      url: "https://raw.githubusercontent.com/sapics/ip-location-db/main/origin-asn/SOURCES.md",
+      extract: :whole_file
+    }.freeze
+
+    # --- Curation-scope terms (NOT Tier A) ---------------------------------------
+    # Terms governing inputs that are read at build time as curation evidence
+    # (D-CUR-1) but never compiled into a published artifact. Pinned in the same
+    # pins.json (entries carry "scope": "curation") so a change in the terms is
+    # noticed, but checked only by the tools that read those inputs - they must
+    # never block the nightly publish, which does not contain them.
+    #
+    # RIR delegated-extended stats (lib/rir_stats.rb, DECISIONS.md D-SRC-1):
+    #   * APNIC / AFRINIC declare "CONDITIONS OF USE" as section 2 of their
+    #     README-EXTENDED; the file is regenerated daily, so we pin just that
+    #     section (extract: conditions_of_use_section).
+    #   * LACNIC's equivalent is a standalone disclaimer.txt (ISO-8859-1, 2007).
+    #   * ARIN publishes no terms for the stats files. We pin its README as an
+    #     ABSENCE RECEIPT: if ARIN ever adds conditions there, the gate trips.
+    #   * RIPE NCC is excluded (restrictive site-wide terms), so nothing is pinned.
+    CURATION_TERMS_URLS = {
+      "apnic-delegated-stats" => {
+        url: "https://ftp.apnic.net/stats/apnic/README-EXTENDED.TXT",
+        extract: :conditions_of_use_section
+      },
+      "afrinic-delegated-stats" => {
+        url: "https://ftp.afrinic.net/pub/stats/afrinic/README-EXTENDED.txt",
+        extract: :conditions_of_use_section
+      },
+      "lacnic-delegated-stats" => {
+        url: "https://ftp.lacnic.net/pub/stats/lacnic/disclaimer.txt",
+        extract: :whole_file
+      },
+      "arin-delegated-stats" => {
+        url: "https://ftp.arin.net/pub/stats/arin/README",
+        extract: :whole_file
+      }
+    }.freeze
 
     # Metadata that ends up in manifest.json's `sources` array so every
     # artifact is self-describing about provenance.
     CATALOG = [
-      { id: "sapics-origin-asn",     url: "https://github.com/sapics/ip-location-db", license: "PDDL-1.0" },
+      ROUTEVIEWS_CATALOG,
       { id: "ipverse-as-metadata",   url: "https://github.com/ipverse/as-metadata",   license: "CC0-1.0" },
       { id: "ipverse-as-ip-blocks",  url: "https://github.com/ipverse/as-ip-blocks",  license: "CC0-1.0" },
       { id: "x4bnet-lists_vpn",      url: "https://github.com/X4BNet/lists_vpn",      license: "MIT" },
@@ -142,8 +259,54 @@ module OpenASNPipeline
       { id: "wikidata-p3797",        url: "https://www.wikidata.org/wiki/Property:P3797", license: "CC0-1.0" },
       { id: "openasn-overrides",     url: "https://github.com/openasn/openasn",       license: "CC0-1.0" }
     ].freeze
+    SAPICS_CATALOG = { id: "sapics-origin-asn", url: "https://github.com/sapics/ip-location-db", license: "PDDL-1.0" }.freeze
 
     module_function
+
+    # Which IP->ASN backbone this build compiles from: RouteViews unless
+    # OPENASN_BACKBONE=sapics (legacy, see above); anything unknown fails
+    # loudly.
+    def backbone
+      b = ENV.fetch("OPENASN_BACKBONE", "").strip
+      b = BACKBONES.first if b.empty?
+      Env.fail_stage!("OPENASN_BACKBONE=#{b.inspect} - expected one of #{BACKBONES.join(', ')}") unless BACKBONES.include?(b)
+      b
+    end
+
+    def routeviews? = backbone == "routeviews"
+
+    # Licence-gate targets for THIS build: the backbone we do not compile
+    # from is not pinned (its terms no longer reach the artifact).
+    def license_urls
+      return LICENSE_URLS if routeviews?
+
+      { "sapics-origin-asn" => SAPICS_LICENSE }.merge(LICENSE_URLS.reject { |id, _| id == "routeviews" })
+    end
+
+    # manifest.json `sources` for THIS build.
+    def catalog
+      return CATALOG if routeviews?
+
+      [SAPICS_CATALOG] + CATALOG.reject { |s| s[:id] == "routeviews" }
+    end
+
+    # RouteViews RIB URL for one collector and a slot "YYYYMMDD.HHMM" (UTC).
+    def routeviews_rib_url(collector, slot)
+      month = "#{slot[0, 4]}.#{slot[4, 2]}"
+      base = collector == "route-views2" ? ROUTEVIEWS_ARCHIVE : "#{ROUTEVIEWS_ARCHIVE}/#{collector}"
+      "#{base}/bgpdata/#{month}/RIBS/rib.#{slot}.bz2"
+    end
+
+    # The newest 2-hourly RIB slot that is safely complete: at least `lag`
+    # seconds old (dumps of big collectors take a while to land). Override
+    # with OPENASN_RV_RIB_SLOT=YYYYMMDD.HHMM to rebuild a specific day.
+    def routeviews_slot(now = Time.now.utc, lag: 3 * 3600)
+      return ENV["OPENASN_RV_RIB_SLOT"] if ENV["OPENASN_RV_RIB_SLOT"].to_s.match?(/\A\d{8}\.\d{4}\z/)
+
+      t = now - lag
+      t = Time.utc(t.year, t.month, t.day, t.hour - (t.hour % 2))
+      t.strftime("%Y%m%d.%H%M")
+    end
 
     # Resolve the actual origin-asn download URLs from sapics' README table.
     # Returns { filename => url }. Falls back to SAPICS_FALLBACK with a
