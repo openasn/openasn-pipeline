@@ -25,6 +25,11 @@
 #
 # asn_country.txt format (one ASN per line; the published `country` column):
 #   AS15169  US  # src: https://about.google/intl/en/locations/ (2026-09-19)
+#   AS201776 UA  # territory: crimea; src: https://... (2026-09-19)
+#   AS9002   --  # none: <why the Wikidata value is not published>; src: https://... (2026-09-19)
+# `--` publishes no country and stops the Wikidata fallback. A `territory:`
+# tag (occupied / breakaway territory, lib/countries.rb TERRITORY_STATES)
+# requires the recognised state's code (CD-19a).
 # ISO 3166-1 alpha-2, upper case: the country the ASN's operator is based in
 # (seat or headquarters), written down from the cited source. Same source rule
 # as org_names.txt: a registry/aggregator host fails the build, because a
@@ -45,6 +50,7 @@ require "yaml"
 require_relative "env"
 require_relative "asjson"
 require_relative "wikidata_names"
+require_relative "countries"
 
 module OpenASNPipeline
   class Overrides
@@ -153,8 +159,21 @@ end
           Env.fail_stage!("#{where}: expected `AS<number>  <CC>  # src: <url> (<date>)`, got: #{stripped.inspect}")
         end
         asn, cc, comment = m[1].to_i, m[2], m[3]
-        if !cc.match?(ISO2) || NOT_COUNTRIES.include?(cc)
-          Env.fail_stage!("#{where}: AS#{asn} country #{cc.inspect} is not an ISO 3166-1 alpha-2 country code")
+        if cc == Countries::NONE
+          cc = nil # publish no country; stops the Wikidata fallback
+        elsif !cc.match?(ISO2) || NOT_COUNTRIES.include?(cc)
+          Env.fail_stage!("#{where}: AS#{asn} country #{cc.inspect} is not an ISO 3166-1 alpha-2 country code " \
+                          "(or `#{Countries::NONE}` for none)")
+        end
+        territory = comment[/\bterritory:\s*([a-z_]+)/, 1]
+        if comment.match?(/\bterritory:/) || territory
+          state = Countries::TERRITORY_STATES[territory]
+          Env.fail_stage!("#{where}: AS#{asn} territory #{territory.inspect} is not one of " \
+                          "#{Countries::TERRITORY_STATES.keys.join(', ')}") unless state
+          unless cc == state
+            Env.fail_stage!("#{where}: AS#{asn} is in #{territory}; its country is the recognised state " \
+                            "#{state}, not #{cc.inspect} (CD-19a)")
+          end
         end
         url = comment[%r{https?://\S+}]
         Env.fail_stage!("#{where}: AS#{asn} has no source URL - every country must be traceable") unless url
@@ -164,6 +183,7 @@ end
         end
         Env.fail_stage!("#{where}: duplicate AS#{asn}") if out.key?(asn)
         out[asn] = { "cc" => cc, "src" => url }
+        out[asn]["territory"] = territory if territory
       end
       out
     end

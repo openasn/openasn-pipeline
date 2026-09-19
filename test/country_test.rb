@@ -79,6 +79,42 @@ module OpenASNPipeline
       assert_equal [15_169, 396_982], by_asn.keys.sort
     end
 
+    def region(qid, region_qid)
+      { "item" => { "value" => "http://www.wikidata.org/entity/#{qid}" }, "via" => { "value" => "region" },
+        "region" => { "value" => "http://www.wikidata.org/entity/#{region_qid}" } }
+    end
+
+    # CD-19a: an item located in an occupied / breakaway territory publishes
+    # the recognised state, never the de facto controller's code; any third
+    # country makes it ambiguous. Q-numbers of the items are made up; the
+    # region QIDs are the real ones (checked 2026-09-19).
+    def test_wikidata_can_never_publish_the_occupier_for_a_territory_operator
+      items, stats = WikidataCountries.parse(json(
+        b("Q901", "P17", "RU"), region("Q901", "Q7835"),                          # Crimea, P17 Russia
+        b("Q902", "P159", "RU"), region("Q902", "Q16150196"),                     # "DPR" HQ
+        region("Q903", "Q7525"),                                                  # Sevastopol, no country
+        b("Q904", "P17", "RU"), region("Q904", "Q23334"),                         # Abkhazia
+        b("Q905", "P17", "RU"), region("Q905", "Q907112"),                        # Transnistria
+        b("Q906", "P17", "TR"), region("Q906", "Q23681"),                         # Northern Cyprus
+        b("Q907", "P17", "UA"), region("Q907", "Q171965"),                        # Luhansk Oblast, already UA
+        b("Q908", "P17", "DE"), region("Q908", "Q756294")                         # third country: ambiguous
+      ))
+      assert_equal %w[UA UA UA GE MD CY UA], %w[Q901 Q902 Q903 Q904 Q905 Q906 Q907].map { |q| items.dig(q, "cc") }
+      assert(%w[Q901 Q902 Q903 Q904 Q905 Q906 Q907].all? { |q| items.dig(q, "via") == "territory" })
+      refute items.key?("Q908")
+      assert_equal 7, stats["territory"]
+      assert_equal 1, stats["ambiguous_territory"]
+      refute(items.values.any? { |r| %w[RU TR].include?(r["cc"]) })
+    end
+
+    def test_the_query_asks_for_every_region_and_every_region_maps_to_a_state
+      WikidataCountries::REGIONS.each do |qid, cc|
+        assert_includes WikidataCountries::QUERY, "wd:#{qid} "[0..-2]
+        assert Countries::TERRITORY_STATES.value?(cc), "#{qid} -> #{cc}"
+      end
+      assert_equal Countries::TERRITORY_STATES.values.uniq.sort, WikidataCountries::REGIONS.values.uniq.sort
+    end
+
     def test_error_pages_raise_instead_of_publishing_nothing
       assert_raises(JSON::ParserError) { WikidataCountries.parse("<html>502 Bad Gateway</html>") }
       assert_raises(ArgumentError) { WikidataCountries.parse("{}") }
@@ -107,6 +143,28 @@ module OpenASNPipeline
       end
     end
 
+    def test_none_publishes_nothing
+      with_countries("AS9002  --  # none: Wikidata says RU; src: https://retn.net/about (2026-09-19)\n") do |o|
+        assert_equal({ "cc" => nil, "src" => "https://retn.net/about" }, o.countries[9002])
+      end
+    end
+
+    # CD-19a: a territory-tagged line must carry the recognised state.
+    def test_territory_lines_must_carry_the_recognised_state
+      with_countries("AS201776  UA  # territory: crimea; src: https://en.wikipedia.org/wiki/Miranda_Media (2026-09-19)\n") do |o|
+        assert_equal({ "cc" => "UA", "src" => "https://en.wikipedia.org/wiki/Miranda_Media", "territory" => "crimea" },
+                     o.countries[201_776])
+      end
+      ["AS201776  RU  # territory: crimea; src: https://a.example/ (x)\n",
+       "AS57354  RU  # territory: abkhazia; src: https://a.example/ (x)\n",
+       "AS1  TR  # territory: northern_cyprus; src: https://a.example/ (x)\n",
+       "AS1  --  # territory: transnistria; src: https://a.example/ (x)\n",
+       "AS1  UA  # territory: donbas; src: https://a.example/ (x)\n",
+       "AS1  UA  # territory: Crimea; src: https://a.example/ (x)\n"].each do |body|
+        assert_raises(StageFailure, body) { with_countries(body) { nil } }
+      end
+    end
+
     def test_bad_codes_unsourced_and_duplicate_lines_fail
       ["AS1  usa  # src: https://a.example/ (x)\n", "AS1  XX  # src: https://a.example/ (x)\n",
        "AS1  EU  # src: https://a.example/ (x)\n", "AS1  US  # no url here\n",
@@ -124,6 +182,25 @@ module OpenASNPipeline
       assert_equal({ "cc" => "US", "source" => "override" }, merged[2914])
       assert_equal({ "cc" => "DE", "source" => "wikidata:Q9396:P17" }, merged[3320])
       assert_equal({ "total" => 2, "override" => 1, "wikidata" => 1 }, Countries.source_counts(merged))
+    end
+
+    def test_none_suppresses_the_wikidata_fallback
+      merged = Countries.merge({ 9002 => { "cc" => nil, "src" => "https://retn.net/" } },
+                               { 9002 => { "cc" => "RU", "qid" => "Q4047837", "via" => "P17" },
+                                 57_304 => { "cc" => "RU", "qid" => "Q4047837", "via" => "P17" } })
+      refute merged.key?(9002)
+      assert_equal "RU", merged.dig(57_304, "cc")
+    end
+
+    # CD-19a end to end: a tagged Crimean operator whose Wikidata item says RU
+    # publishes UA, and the belt-and-braces check refuses any other outcome.
+    def test_a_territory_operator_never_publishes_the_occupier
+      wd = { 201_776 => { "cc" => "RU", "qid" => "Q133119943", "via" => "P17" } }
+      tagged = { 201_776 => { "cc" => "UA", "src" => "https://x.example/", "territory" => "crimea" } }
+      assert_equal({ "cc" => "UA", "source" => "override" }, Countries.merge(tagged, wd)[201_776])
+      assert_raises(StageFailure) do
+        Countries.check_territories!(tagged, { 201_776 => { "cc" => "RU", "source" => "wikidata:Q133119943:P17" } })
+      end
     end
   end
 

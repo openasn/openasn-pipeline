@@ -34,6 +34,19 @@
 # restricted-reference rule is kept anyway, so a future bulk import from a
 # registry cannot enter silently.
 #
+# REGIONS: the query also returns whether the item's HQ (P159) or location
+# (P131) lies, through P131*, in one of REGIONS:
+#   * Occupied and breakaway territories (CD-19a; Countries::TERRITORY_STATES):
+#     an item located in Crimea, Sevastopol, the Donetsk/Luhansk/Zaporizhzhia/
+#     Kherson oblasts (or the Russian-declared entities there), Abkhazia,
+#     South Ossetia, Transnistria or Northern Cyprus publishes the recognised
+#     state (UA, GE, MD, CY) when its own result is that state, the de facto
+#     controller (Countries::DE_FACTO_CONTROLLERS) or nothing; any other
+#     result makes it ambiguous and it publishes nothing. So Wikidata can
+#     never put RU on a Crimean operator, whatever its P17 says.
+# Measured 2026-09-19: no admitted item sits in a territory. The rule is a
+# guard; asn_country.txt's `territory:` tags carry the operators we know about.
+#
 # SEMANTICS. The value means "the country the ASN's operator is based in"
 # (seat or headquarters). That is close to, but not the same as, a registry
 # country, which records the address on the registrant's record.
@@ -42,6 +55,7 @@ require "json"
 require "uri"
 require_relative "env"
 require_relative "wikidata_names"
+require_relative "countries"
 
 module OpenASNPipeline
   module WikidataCountries
@@ -49,25 +63,59 @@ module OpenASNPipeline
     # from the ~1.8k P3797 items. Without it the planner starts from every
     # country-bearing statement and the query times out (measured 2026-09-19:
     # 60s timeout without the hint, 1.9s with it).
+    # Region QID -> published ISO code. Every QID was checked by label on
+    # 2026-09-19 (wbgetentities / rdfs:label SPARQL); never add one from memory.
+    REGIONS = {
+      "Q7835" => "UA",       # Crimea (peninsula)
+      "Q756294" => "UA",     # Autonomous Republic of Crimea
+      "Q15966495" => "UA",   # Republic of Crimea (Russian-declared)
+      "Q7525" => "UA",       # Sevastopol
+      "Q2012050" => "UA",    # Donetsk Oblast
+      "Q171965" => "UA",     # Luhansk Oblast
+      "Q171334" => "UA",     # Zaporizhzhia Oblast
+      "Q163271" => "UA",     # Kherson Oblast
+      "Q16150196" => "UA",   # Donetsk People's Republic (Russian-declared)
+      "Q114334914" => "UA",  # Donetsk People's Republic (2014-2022)
+      "Q16746854" => "UA",   # Luhansk People's Republic (Russian-declared)
+      "Q114327408" => "UA",  # Luhansk People's Republic (2014-2022)
+      "Q114318324" => "UA",  # Kherson Oblast (Sept 2022 proclamation)
+      "Q114318415" => "UA",  # Zaporozhye Oblast (Sept 2022 proclamation)
+      "Q114331288" => "UA",  # Kherson Oblast (Russian federal subject)
+      "Q114333615" => "UA",  # Zaporozhye Oblast (Russian federal subject)
+      "Q23334" => "GE",      # Abkhazia
+      "Q31354462" => "GE",   # Republic of Abkhazia (de facto state)
+      "Q2914461" => "GE",    # Autonomous Republic of Abkhazia
+      "Q23427" => "GE",      # South Ossetia
+      "Q907112" => "MD",     # Transnistria
+      "Q648767" => "MD",     # Administrative-Territorial Units of the Left Bank of the Dniester
+      "Q23681" => "CY"       # Northern Cyprus
+    }.freeze
+
     QUERY = <<~SPARQL
-      SELECT ?item ?via ?cc ?rank ?end
+      SELECT ?item ?via ?cc ?rank ?end ?region
              (GROUP_CONCAT(DISTINCT CONCAT(STR(?ref), "|", COALESCE(STR(?refurl), ""), "|", COALESCE(STR(?stated), "")); separator=" ") AS ?refs)
       WHERE {
         hint:Query hint:optimizer "None" .
         ?item p:P3797 ?any .
         {
-          ?item p:P17 ?st . ?st ps:P17 ?c . BIND("P17" AS ?via)
+          {
+            ?item p:P17 ?st . ?st ps:P17 ?c . BIND("P17" AS ?via)
+          } UNION {
+            ?item p:P159 ?st . ?st ps:P159 ?loc . ?loc wdt:P17 ?c . BIND("P159" AS ?via)
+          }
+          ?st wikibase:rank ?rank .
+          ?c wdt:P297 ?cc .
+          OPTIONAL { ?st pq:P582 ?end . }
+          OPTIONAL { ?st prov:wasDerivedFrom ?ref .
+                     OPTIONAL { ?ref pr:P854 ?refurl . }
+                     OPTIONAL { ?ref pr:P248 ?stated . } }
         } UNION {
-          ?item p:P159 ?st . ?st ps:P159 ?loc . ?loc wdt:P17 ?c . BIND("P159" AS ?via)
+          ?item (wdt:P159|wdt:P131)/wdt:P131* ?region .
+          VALUES ?region { #{REGIONS.keys.map { |q| "wd:#{q}" }.join(' ')} }
+          BIND("region" AS ?via)
         }
-        ?st wikibase:rank ?rank .
-        ?c wdt:P297 ?cc .
-        OPTIONAL { ?st pq:P582 ?end . }
-        OPTIONAL { ?st prov:wasDerivedFrom ?ref .
-                   OPTIONAL { ?ref pr:P854 ?refurl . }
-                   OPTIONAL { ?ref pr:P248 ?stated . } }
       }
-      GROUP BY ?item ?via ?cc ?rank ?end
+      GROUP BY ?item ?via ?cc ?rank ?end ?region
     SPARQL
 
     # "stated in" items that are registry databases or their aggregators.
@@ -99,7 +147,14 @@ module OpenASNPipeline
       stats = Hash.new(0)
       # qid -> via -> { preferred: Set-ish Array, normal: Array }
       claims = Hash.new { |h, k| h[k] = Hash.new { |hh, kk| hh[kk] = { "preferred" => [], "normal" => [] } } }
+      regions = Hash.new { |h, k| h[k] = [] } # qid -> [published code of each region hit]
       bindings.each do |b|
+        if b.dig("via", "value") == "region"
+          code = REGIONS[b.dig("region", "value").to_s.split("/").last]
+          regions[b.dig("item", "value").to_s.split("/").last] << code if code
+          next
+        end
+
         stats["statements"] += 1
         rank = b.dig("rank", "value").to_s
         if rank.end_with?("DeprecatedRank")
@@ -140,8 +195,26 @@ module OpenASNPipeline
           stats["ambiguous_#{via}"] += 1 if codes.size > 1
         end
       end
+      apply_regions!(out, regions, stats)
       stats["items_with_country"] = out.size
       [out, stats.to_h]
+    end
+
+    # The REGIONS rules (see the header). Mutates out and stats.
+    def apply_regions!(out, regions, stats)
+      regions.each do |qid, codes|
+        codes = codes.uniq
+        base = out[qid] && out[qid]["cc"]
+        state = codes.first
+        allowed = [nil, state, *Countries::DE_FACTO_CONTROLLERS.fetch(state, [])]
+        if codes.size == 1 && allowed.include?(base)
+          out[qid] = { "cc" => state, "via" => "territory" }
+          stats["territory"] += 1
+        else
+          out.delete(qid)
+          stats["ambiguous_territory"] += 1
+        end
+      end
     end
 
     # Joins the admitted ASN -> item links (WikidataNames.parse) with the item
