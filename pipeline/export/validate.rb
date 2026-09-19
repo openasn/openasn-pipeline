@@ -36,6 +36,7 @@ require_relative "contract"
 require_relative "csv"
 require_relative "gzip"
 require_relative "metadata"
+require_relative "mmdb"
 require_relative "sqlite"
 
 module OpenASNPipeline
@@ -45,7 +46,7 @@ module OpenASNPipeline
 
       # csv:/sqlite: are the RAW files, *_gz their transport-compressed
       # twins with the sha256/bytes that were advertised for them.
-      def call(records:, metadata:, csv: nil, csv_gz: nil, sqlite: nil, sqlite_gz: nil)
+      def call(records:, metadata:, csv: nil, csv_gz: nil, sqlite: nil, sqlite_gz: nil, mmdb: nil)
         report = { "records" => records, "checks" => {} }
         meta = Metadata.validate!(JSON.parse(File.read(metadata)))
         report["checks"]["metadata"] = { "keys" => meta.keys.length }
@@ -59,6 +60,11 @@ module OpenASNPipeline
           report["checks"]["sqlite"] = Sqlite.verify(database: sqlite, records: records, metadata: metadata)
           report["checks"]["sqlite_gz"] = validate_gzip(sqlite_gz, raw: sqlite) if sqlite_gz
         end
+
+        # The MMDB half is delegated to the Go tool's verify mode, which
+        # reads the finished database back with maxminddb-golang - a library
+        # that shares no code with the writer that produced it.
+        report["checks"]["mmdb"] = Mmdb.verify(database: mmdb, records: records, metadata: metadata) if mmdb
 
         report
       end

@@ -20,6 +20,14 @@
 #   G5. Spot-check panel (spotchecks.yml) passes 100%. The panel is a
 #       tripwire, not gospel: update expectations only via reviewed PR with
 #       a reason (routing changes happen - e.g. an IP moving providers).
+#   G6. The orgs sidecar resolves well-known ASNs to plausible names.
+#   G7. The ASSEMBLED CANDIDATE is complete and internally consistent: every
+#       registered asset is still the bytes it was registered as, the
+#       manifest and SHA256SUMS describe exactly the registry (and never
+#       themselves), the export inventory equals what the dataset's export
+#       contract requires of this mode, and a native client can still
+#       resolve its own files out of the manifest. It runs after assembly
+#       and before any upload (PRD §15.1, §16.1).
 
 require "yaml"
 require "ipaddr"
@@ -28,6 +36,7 @@ require_relative "lib/binary"
 require_relative "lib/classifier"
 require_relative "lib/orgs"
 require_relative "lib/drift_gate"
+require_relative "publish"
 
 module OpenASNPipeline
   module Validate
@@ -61,6 +70,75 @@ module OpenASNPipeline
 
       Env.log("validate: all gates green")
       artifacts
+    end
+
+    # G7: the last gate before publication reads the candidate back from
+    # disk. Everything it checks was true when each stage produced its file;
+    # the point is that it is STILL true now, of the exact bytes an uploader
+    # would send.
+    def candidate!(registry:, manifest:, mode:, dir:)
+      registry.verify!
+
+      on_disk = JSON.parse(File.read(File.join(dir, "manifest.json")))
+      names = on_disk.fetch("files").map { |entry| entry.fetch("name") }
+      unless names == registry.payload_names
+        Env.fail_stage!("G7: manifest.json lists #{names.inspect} but the registry holds " \
+                        "#{registry.payload_names.inspect}")
+      end
+      overlap = names & ReleaseAssets::ENVELOPE_NAMES
+      unless overlap.empty?
+        Env.fail_stage!("G7: #{overlap.join(', ')} appears in manifest.files; an envelope file cannot hash itself")
+      end
+
+      on_disk.fetch("files").each do |entry|
+        asset = registry[entry.fetch("name")]
+        next if asset && asset.sha256 == entry.fetch("sha256") && asset.bytes == entry.fetch("bytes")
+
+        Env.fail_stage!("G7: manifest entry for #{entry['name']} does not describe the candidate file")
+      end
+
+      sums = File.read(File.join(dir, "SHA256SUMS"))
+      Env.fail_stage!("G7: SHA256SUMS does not match the registry") unless sums == registry.checksums
+      # Compare NAMES, not substrings: "fetch-manifest.json" ends with the
+      # envelope's name and is a perfectly ordinary payload.
+      listed = sums.lines.map { |line| line.split("  ", 2).last.to_s.chomp }
+      self_hashed = listed & ReleaseAssets::ENVELOPE_NAMES
+      unless self_hashed.empty?
+        Env.fail_stage!("G7: SHA256SUMS lists #{self_hashed.join(', ')}; it must list payloads only")
+      end
+
+      registry.require_exports!(mode.assets)
+      check_export_identities!(on_disk)
+      # An old native client must still find its three artifacts and nothing
+      # about the additive entries may stop it (PRD §15.3, test id U22).
+      Publish.native_client_view(on_disk)
+
+      Env.log("G7: candidate complete - #{registry.payloads.size} payloads " \
+              "(#{registry.exports.size} exports, mode #{mode.selected}) plus manifest.json and SHA256SUMS")
+      registry
+    end
+
+    # Every export entry must carry the identities this producer stamped into
+    # the file itself. A manifest that labeled an asset with a profile the
+    # bytes do not implement would be worse than no manifest at all.
+    def check_export_identities!(manifest)
+      manifest.fetch("files").each do |entry|
+        block = entry["export"] or next
+
+        {
+          "schema_version" => Export::Contract::SCHEMA_VERSION,
+          "schema_revision" => Export::Contract::SCHEMA_REVISION,
+          "classification_profile" => Export::Contract::CLASSIFICATION_PROFILE,
+          "lookup_policy_version" => Export::Contract::LOOKUP_POLICY_VERSION,
+          "scope" => Export::Contract::SCOPE,
+          "tier_b_included" => Export::Contract::TIER_B_INCLUDED
+        }.each do |key, expected|
+          next if block[key] == expected
+
+          Env.fail_stage!("G7: #{entry['name']} is labeled #{key}=#{block[key].inspect}, but this producer " \
+                          "emits #{expected.inspect}")
+        end
+      end
     end
 
     # G6: the orgs sidecar must resolve well-known ASNs to plausible names.

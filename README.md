@@ -31,7 +31,15 @@ The **nightly build workflow lives in the data repo** (`.github/workflows/nightl
 | crosscheck | `pipeline/crosscheck.rb` | ipverse category quality vs the X4B ∪ bad-asn reference set; drift alarms |
 | compile | `pipeline/compile.rb` | flags, corrections, gap-fill via as-ip-blocks, pack OASN v1 + OORG v1 |
 | validate | `pipeline/validate.rb` | round-trip re-find, size sanity, ±20% deltas, the spot panel, orgs checks |
-| publish | `pipeline/publish.rb` | manifest with provenance, SHA256SUMS, convenience CSV, release upload |
+| prepare | `pipeline/publish.rb` | convenience CSV, repo docs, and the source catalogue built ONCE for everything downstream |
+| project + spool | `pipeline/export/project.rb`, `spool.rb` | sweep the native layers into coalesced effective intervals with a core-v1 verdict each |
+| export writers | `pipeline/export/{csv,sqlite,mmdb}.rb` | `openasn.csv.gz`, `openasn.sqlite.gz`, `openasn.mmdb` from that one spool |
+| validate exports | `pipeline/export/validate.rb` | re-read every export with an independent reader and compare it back to the spool |
+| assemble | `pipeline/publish.rb`, `lib/release_assets.rb` | the explicit release inventory, manifest with provenance, SHA256SUMS |
+| candidate gate | `pipeline/validate.rb` (G7) | the assembled candidate is complete, self-consistent, and still readable by an old native client |
+| publish | `pipeline/publish.rb` | ordered upload: payloads, then SHA256SUMS, then manifest LAST |
+
+A build assembles in a fresh directory it owns (`build/work/candidate/<build_id>/`) and promotes it to `build/dist/` only once every gate has passed, so `build/dist` is the last GOOD build rather than a pile of every build. What ends up in a release is decided by the registry in `lib/release_assets.rb`, never by a directory listing: a file nothing registered is not uploaded, not checksummed and not mirrored, however loudly it sits in the same folder.
 
 ## Flags are evidence, not product labels
 
@@ -50,13 +58,95 @@ ruby pipeline/run.rb             # full build into build/dist/ (~100MB downloads
 OFFLINE=1 ruby pipeline/run.rb   # rebuild from cache (fast dev iteration; gates that
                                  # need the network are skipped LOUDLY — never publish these)
 PUBLISH=1 ruby pipeline/run.rb   # + upload to the openasn/openasn rolling release
+OPENASN_EXPORTS=all ruby pipeline/run.rb   # which portable exports to build (see below)
 rake test                        # unit tests (pure logic; no network, no data repo needed)
 rake 'lookup[8.8.8.8]'           # classify an IP against your local build
 rake overrides:candidates        # curation aid: writes candidate lists to build/work/
 rake licenses:check              # verify upstream license pins without building
 ```
 
-Requirements: Ruby ≥ 3.2, `jq` recommended (streams the ~69MB ipverse JSON; a stdlib fallback exists but is memory-hungry), `gh` CLI for publishing.
+Requirements: Ruby ≥ 3.2, `jq` recommended (streams the ~69MB ipverse JSON; a stdlib fallback exists but is memory-hungry), `gh` CLI for publishing. The portable exports add two **build-only** toolchains — Python ≥ 3.9 for SQLite/CSV and Go for MMDB — described below.
+
+## Portable exports
+
+The release carries the same data in three portable representations
+alongside the packed artifacts: `openasn.sqlite.gz`, `openasn.csv.gz` and
+`openasn.mmdb`. All three are projected from the SAME spool of coalesced
+effective intervals, so they cannot disagree with each other, and each
+carries the `core-v1` classification profile and lookup policy 1 stamped in
+its own metadata. The public specification is
+[EXPORT_FORMATS.md](https://github.com/openasn/openasn/blob/main/EXPORT_FORMATS.md)
+in the data repo.
+
+### Modes
+
+`OPENASN_EXPORTS` selects what a run builds:
+
+| mode | builds |
+|---|---|
+| `none` | nothing; the native artifacts only, exactly as before this feature existed |
+| `portable` | `openasn.sqlite.gz` + `openasn.csv.gz` |
+| `all` | those two plus `openasn.mmdb` |
+
+**When the variable is unset, the mode comes from the DATA repo**, from
+`export-contract.json`'s `required_mode`. That file is the promise to
+consumers, and it lives over there rather than here for a reason: once a
+release ships `openasn.sqlite.gz`, a later release that quietly omits it
+breaks every pinned updater. A constant in this repo could be forgotten by a
+scheduled run; a tracked file in the repo that publishes the data cannot,
+and it is raised through the same reviewed PR that installs the toolchain
+the new asset needs. A dataset checkout with no contract file at all
+predates the feature and requires nothing; a malformed one is a hard
+failure, never a silent fallback.
+
+A local run may select any mode, above or below required, for debugging. A
+**publishing** run may not select below required, and every asset the
+selected mode declares must validate or nothing is uploaded.
+
+### Build-only toolchains
+
+Neither reaches a consumer: nothing we ship needs Python or Go, and the
+native artifacts are byte-identical whether or not the exports were built.
+
+| toolchain | needed for | resolved by |
+|---|---|---|
+| Python ≥ 3.9 with `sqlite3` | `portable`, `all` | `OPENASN_PYTHON`, else an ordered candidate list (`pipeline/export/sqlite.rb`) |
+| Go (`go.mod` pins the version) | `all` only | `OPENASN_MMDB_TOOL`, else compiled from `tools/mmdbwriter/` |
+
+**Which Python is not cosmetic.** `sqlite3.sqlite_version` decides the
+physical bytes of the database, and a bare `python3` is whatever PATH
+happens to resolve — on one development machine that is a Python 3.4 that is
+killed on startup, and among healthy interpreters `/usr/bin/python3` and a
+Homebrew one ship different SQLite libraries. So the interpreter is chosen
+explicitly, probed before it is allowed anywhere near a release, and its
+path, version and SQLite version are recorded in the export metadata's
+`producer` block and in the manifest's `export_producer.tools`. Byte
+reproducibility is scoped to that recorded producer environment; semantic
+equivalence holds everywhere.
+
+### Reproducing and inspecting an export
+
+```bash
+# One build, twice, into two directories: same inputs and same recorded
+# toolchain produce the same payload hashes.
+OPENASN_EXPORTS=all OFFLINE=1 ruby pipeline/run.rb
+rake 'exports:from_release[build/dist,build/work/repro]'   # verifies; can never publish
+sha256sum build/dist/openasn.csv.gz build/work/repro/openasn.csv.gz
+
+# Re-validate an assembled candidate from files already on disk.
+rake 'exports:validate[build/work/export/<generation>]'
+
+# Size, time and (measured from outside) memory for the writers.
+/usr/bin/time -l bundle exec rake 'exports:benchmark[build/dist,build/work/export-bench]'
+
+rake exports:test        # export unit tests only, offline, synthetic fixtures
+rake exports:mmdb_test   # + the Go writer: build, vet, Go tests, Ruby MMDB suite
+```
+
+`exports:from_release` re-exports an already published snapshot and is
+deliberately incapable of publishing what it produces: it fetches nothing,
+checks no license and runs no drift gate, so its output is stamped
+`NOT-PUBLISHABLE.txt` and it refuses to run at all while `PUBLISH` is set.
 
 ### The MMDB writer (build-only Go toolchain)
 
