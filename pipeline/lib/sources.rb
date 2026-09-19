@@ -55,6 +55,14 @@ module OpenASNPipeline
     # (source files and generated output)" - the wording that makes X4B
     # redistributable when most aggregated lists are not (quote pinned in data/licenses/).
     #
+    # BUT the generated output also merges third-party feeds X4B does not own
+    # (Apple Private Relay, Mullvad, PIA, Proton - all Tier B for us). The
+    # published output/ files are therefore only an UPPER BOUND: normalize.rb
+    # keeps vpn ranges only where X4B's first-party inputs (ASN.txt expanded
+    # against our backbone, plus ips/Manual.txt) justify them, and strips the
+    # named third-party file from the datacenter list. Rationale and
+    # measurements: lib/x4b_first_party.rb, data-repo DECISIONS.md D-SRC-3.
+    #
     # GOTCHA: the legacy root ipv4.txt path was REMOVED in 2026 (it broke
     # MISP's generator which still hardcodes it). Only output/... paths are
     # stable. IPv4 only - X4B publishes no IPv6; v6 VPN signal comes from
@@ -62,9 +70,22 @@ module OpenASNPipeline
     X4B_VPN_URL = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt"
     X4B_DC_URL  = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt"
     # Hand-curated ASN input files (first-party curation, MIT) - seeds for
-    # data/overrides/ and the crosscheck reference set.
+    # data/overrides/, the crosscheck reference set, and the first-party
+    # restriction of the overlays above.
     X4B_VPN_ASN_URL = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/vpn/ASN.txt"
     X4B_DC_ASN_URL  = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/datacenter/ASN.txt"
+    # Hand-curated netblocks (first-party, MIT; "Comment description
+    # manditory" per the file header). The ONLY files under input/*/ips/ that
+    # are first-party - every sibling there is a third-party feed.
+    X4B_VPN_MANUAL_URL = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/vpn/ips/Manual.txt"
+    X4B_DC_MANUAL_URL  = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/datacenter/ips/Manual.txt"
+    # Third-party feed files X4B merges into output/datacenter/ipv4.txt. Read
+    # ONLY to subtract them (D-CUR-1 consultation; never republished). No X4B
+    # workflow writes to input/datacenter/ips/ today - if one ever does, add
+    # its file here (lib/x4b_first_party.rb explains why dc is a blacklist).
+    X4B_DC_FEEDS = {
+      "input/datacenter/ips/protonvpn.txt" => "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/datacenter/ips/protonvpn.txt"
+    }.freeze
 
     # --- brianhama/bad-asn-list: curated hosting/cloud/colo ASNs --------------
     # MIT, first-party curation (~700+ ASNs). Also the market thesis: its

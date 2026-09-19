@@ -161,7 +161,7 @@ module OpenASNPipeline
     SOURCE_FETCH_KEYS = {
       "sapics-origin-asn"      => %i[sapics_v4 sapics_v6],
       "ipverse-as-metadata"    => %i[as_json],
-      "x4bnet-lists_vpn"       => %i[x4b_vpn x4b_dc x4b_vpn_asn x4b_dc_asn],
+      "x4bnet-lists_vpn"       => %i[x4b_vpn x4b_dc x4b_vpn_asn x4b_dc_asn x4b_vpn_manual x4b_dc_manual],
       "brianhama-bad-asn-list" => %i[bad_asn]
     }.freeze
 
