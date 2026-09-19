@@ -118,9 +118,17 @@ task "exports:from_release", [:input, :output] do |_t, args|
   output = args[:output] or abort("usage: rake 'exports:from_release[INPUT,OUTPUT]'")
   abort("#{output} already exists; the exporters refuse to overwrite a candidate") if File.exist?(output)
 
-  result = OpenASNPipeline::Export::FromRelease.call(input: input, output: output)
+  # Which formats to reproduce. `portable` stays the default so the task
+  # behaves as it always has; CI raises it to `all` because a reproduction
+  # that skipped the MMDB writer would leave the one build-only toolchain
+  # in the system unexercised. The name is the same OPENASN_EXPORTS the
+  # pipeline and the nightly already use, so there is one vocabulary.
+  mode = ENV.fetch("OPENASN_EXPORTS", "portable")
+
+  result = OpenASNPipeline::Export::FromRelease.call(input: input, output: output, mode: mode)
   puts JSON.pretty_generate(
     "build_id" => result.build_id,
+    "mode" => mode,
     "input" => result.input,
     "output" => result.output,
     "publishable" => false,
@@ -140,10 +148,15 @@ task "exports:validate", [:dir] do |_t, args|
 
   records  = present.call("records.jsonl") or abort("#{dir}: no records.jsonl to validate against")
   metadata = present.call("metadata.json") or abort("#{dir}: no metadata.json")
+  # openasn.mmdb is passed like every other output rather than being left
+  # out: a candidate assembled in mode `all` carries one, and a validator
+  # that silently ignored the only file it did not know about would report
+  # PASS on a directory it had not fully read.
   report = OpenASNPipeline::Export::Validate.call(
     records: records, metadata: metadata,
     csv: present.call("openasn.csv"), csv_gz: present.call("openasn.csv.gz"),
-    sqlite: present.call("openasn.sqlite"), sqlite_gz: present.call("openasn.sqlite.gz")
+    sqlite: present.call("openasn.sqlite"), sqlite_gz: present.call("openasn.sqlite.gz"),
+    mmdb: present.call("openasn.mmdb")
   )
   puts JSON.pretty_generate(report)
 end
@@ -231,4 +244,80 @@ task "exports:mmdb_test" do
   sh "go -C tools/mmdbwriter vet ./..."
   sh "go -C tools/mmdbwriter test ./..."
   ruby "-Ipipeline test/export_mmdb_test.rb"
+end
+
+# --- SQLite writer (build-only Python toolchain) ---------------------------
+# The mirror image of exports:mmdb_test, and it refuses to skip for the same
+# reason. The Ruby suite never runs sqlite.py's own unit tests, so the whole
+# Python path - interpreter resolution, spool binding, schema application,
+# the lookup query plan - could break while `rake test` stayed green.
+#
+# WHICH interpreter runs it is the point, not a detail. On the development
+# machine a bare `python3` is a Python 3.4 that is killed on startup (exit
+# 137), and among healthy interpreters /usr/bin/python3 and
+# /opt/homebrew/bin/python3 carry different SQLite libraries that write
+# physically different database files. So this resolves the interpreter
+# through the same code the release producer uses and PRINTS what it chose:
+# a green run that silently used another SQLite engine than the one that
+# writes the release proves nothing about the release.
+desc "SQLite writer: run sqlite.py's stdlib-only test suite under the resolved build interpreter"
+task "exports:python_test" do
+  require "json"
+  require_relative "pipeline/export/sqlite"
+
+  python = OpenASNPipeline::Export::Sqlite.interpreter
+  puts JSON.pretty_generate("resolved_interpreter" => python.to_h,
+                            "script" => OpenASNPipeline::Export::Sqlite::SCRIPT)
+  # sys.version and sqlite3.sqlite_version straight from the chosen
+  # interpreter, in the log, before a single assertion runs.
+  # sqlite3.sqlite_version and nothing else from that module: the DB-API
+  # `sqlite3.version` attribute was deprecated in Python 3.12 and REMOVED in
+  # 3.14, so printing it would turn this log line into an AttributeError on
+  # exactly the newer interpreters an operator is most likely to have.
+  sh python.command, "-c", <<~PY
+    import sqlite3, sys
+    print("python  ", sys.version.replace("\\n", " "))
+    print("argv[0] ", sys.executable)
+    print("sqlite3 ", sqlite3.sqlite_version)
+  PY
+  sh python.command, "-m", "unittest", "discover", "-s", "test/python", "-t", "test/python", "-v"
+end
+
+# --- the offline end-to-end (PRD §17.1) ------------------------------------
+# Three tasks rather than one, because the middle of the chain is the two
+# tasks that already exist: `exports:synthetic` lays down native bytes,
+# `exports:from_release` + `exports:validate` do the real work unchanged,
+# and `exports:candidate` assembles and checks what a release would be.
+# Splitting it that way means CI exercises the operator tooling that ships,
+# not a parallel code path written for CI.
+desc "Write a synthetic OASN/OORG release (offline fixture): rake 'exports:synthetic[build/work/ci-e2e]'"
+task "exports:synthetic", [:dir] do |_t, args|
+  require_relative "pipeline/tools/export_ci"
+  dir = args[:dir] or abort("usage: rake 'exports:synthetic[DIR]' (quote the brackets in zsh)")
+  release = File.join(dir, OpenASNPipeline::Tools::ExportCI::RELEASE_DIR)
+  abort("#{release} already exists; the harness writes a fresh fixture") if File.exist?(release)
+  OpenASNPipeline::Tools::ExportCI.write_release(release)
+end
+
+desc "Assemble + check a release candidate from a synthetic generation: rake 'exports:candidate[build/work/ci-e2e]'"
+task "exports:candidate", [:dir] do |_t, args|
+  require "json"
+  require_relative "pipeline/tools/export_ci"
+  ci = OpenASNPipeline::Tools::ExportCI
+  dir = args[:dir] or abort("usage: rake 'exports:candidate[DIR]' (quote the brackets in zsh)")
+
+  report = ci.assemble(release: File.join(dir, ci::RELEASE_DIR),
+                       export: File.join(dir, ci::EXPORT_DIR),
+                       candidate: File.join(dir, ci::CANDIDATE_DIR))
+  puts JSON.pretty_generate(report)
+end
+
+desc "Build the synthetic generation twice at a fixed timestamp and compare payload hashes: rake 'exports:reproducibility[build/work/ci-repro]'"
+task "exports:reproducibility", [:dir] do |_t, args|
+  require "json"
+  require_relative "pipeline/tools/export_ci"
+  dir = args[:dir] or abort("usage: rake 'exports:reproducibility[DIR]' (quote the brackets in zsh)")
+  abort("#{dir} already exists; each comparison starts from an empty directory") if File.exist?(dir)
+
+  puts JSON.pretty_generate(OpenASNPipeline::Tools::ExportCI.reproduce(root: dir))
 end
