@@ -1,0 +1,21 @@
+{
+  "_comment": "Injected copy of the DATA repo's export-contract.json, used only by the offline CI harness (PRD 17.4: 'Pipeline offline unit tests inject a fixture config'). It differs from production in exactly one value: required_mode is 'all', because the synthetic end-to-end exists to exercise every writer, and a fixture that required 'none' would let the whole export path be skipped while CI stayed green. Every other field carries the published contract's value (the prose _comment_* keys are dropped); identities are checked for equality by Export::Mode, so a drift here fails loudly rather than mislabeling an asset.",
+  "config_version": 1,
+  "required_mode": "all",
+  "modes": ["none", "portable", "all"],
+  "mode_order": ["none", "portable", "all"],
+  "schema_version": 1,
+  "schema_revision": 0,
+  "classification_profile": "core-v1",
+  "lookup_policy_version": 1,
+  "assets": {
+    "none": [],
+    "portable": ["openasn.sqlite.gz", "openasn.csv.gz"],
+    "all": ["openasn.sqlite.gz", "openasn.csv.gz", "openasn.mmdb"]
+  },
+  "asset_formats": {
+    "openasn.sqlite.gz": {"format": "sqlite", "media_type": "application/vnd.sqlite3", "content_encoding": "gzip", "uncompressed_name": "openasn.sqlite"},
+    "openasn.csv.gz": {"format": "csv", "media_type": "text/csv; charset=utf-8", "content_encoding": "gzip", "uncompressed_name": "openasn.csv"},
+    "openasn.mmdb": {"format": "mmdb", "media_type": "application/octet-stream", "content_encoding": "identity", "uncompressed_name": null}
+  }
+}
