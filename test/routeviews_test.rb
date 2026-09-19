@@ -83,3 +83,100 @@ module OpenASNPipeline
     end
   end
 end
+
+require "tmpdir"
+require_relative "../pipeline/lib/http"
+require_relative "../pipeline/lib/routeviews"
+
+module OpenASNPipeline
+  # RB-1 (review 2026-09-19): a collector's missing RIB must never be replaced
+  # by a cached RIB of arbitrary age. The first version used one slot-less
+  # cache key per collector, so Http#fetch's keep-last-good served whatever
+  # RIB was last downloaded - from a collector retired months ago, forever.
+  class RouteViewsRibResolutionTest < Minitest::Test
+    SLOT = "20260919.0000"
+
+    # An Http whose network answers only for `live` collectors.
+    def http_with(dir, live:)
+      http = Http.new(cache_dir: dir)
+      http.define_singleton_method(:fetch) do |url, key, offline: false|
+        path = path_for(key)
+        return path if offline && File.exist?(path)
+        raise StageFailure, "offline mode but no cached copy of #{key}" if offline
+        raise StageFailure, "HTTP 404 for #{url}" unless live.any? { |c| url.include?("/#{c}/") || (c == "route-views2" && url.include?(".org/bgpdata/")) }
+
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, "fresh")
+        path
+      end
+      http
+    end
+
+    def seed(dir, collector, slot)
+      path = File.join(dir, RouteViews.cache_key(collector, slot))
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "cached #{slot}")
+      path
+    end
+
+    def all = Sources::ROUTEVIEWS_COLLECTORS
+
+    def test_fresh_slot_is_used_and_older_cached_ribs_are_pruned
+      Dir.mktmpdir do |dir|
+        old = seed(dir, "route-views.linx", "20260918.0000")
+        legacy = File.join(dir, RouteViews.legacy_cache_key("route-views.linx"))
+        File.write(legacy, "pre-RB-1 slot-less cache")
+        ribs = RouteViews.resolve_ribs(http: http_with(dir, live: all), offline: false, slot: SLOT)
+        assert_equal all, ribs.keys
+        assert(ribs.values.all? { |r| r[:slot] == SLOT })
+        refute File.exist?(old), "yesterday's RIB is pruned once today's is in"
+        refute File.exist?(legacy), "the slot-less pre-RB-1 file is pruned"
+      end
+    end
+
+    def test_a_dead_collector_never_votes_with_an_old_rib
+      Dir.mktmpdir do |dir|
+        ancient = seed(dir, "route-views.linx", "20260619.0000") # a collector retired three months ago
+        ribs = RouteViews.resolve_ribs(http: http_with(dir, live: all - ["route-views.linx"]), offline: false, slot: SLOT)
+        refute ribs.key?("route-views.linx"), "a 92-day-old RIB must not stand in for today's"
+        assert_equal all.size - 1, ribs.size
+        refute File.exist?(ancient), "a RIB past the fallback window can never be used again: pruned"
+      end
+    end
+
+    def test_one_nightly_back_is_a_stamped_fallback_not_a_silent_one
+      Dir.mktmpdir do |dir|
+        yesterday = seed(dir, "route-views6", "20260918.0000")
+        ribs = RouteViews.resolve_ribs(http: http_with(dir, live: all - ["route-views6"]), offline: false, slot: SLOT)
+        assert_equal "20260918.0000", ribs.dig("route-views6", :slot)
+        assert_equal yesterday, ribs.dig("route-views6", :path)
+        assert File.exist?(yesterday), "the RIB in use is kept"
+        # 36h is the limit: 38h older is skipped.
+        FileUtils.rm_f(yesterday)
+        seed(dir, "route-views6", "20260917.1000")
+        ribs = RouteViews.resolve_ribs(http: http_with(dir, live: all - ["route-views6"]), offline: false, slot: SLOT)
+        refute ribs.key?("route-views6")
+      end
+    end
+
+    def test_a_newer_cached_rib_never_stands_in_for_an_older_requested_slot
+      Dir.mktmpdir do |dir|
+        seed(dir, "route-views.sg", "20260919.0200")
+        ribs = RouteViews.resolve_ribs(http: http_with(dir, live: all - ["route-views.sg"]), offline: false, slot: SLOT)
+        refute ribs.key?("route-views.sg")
+      end
+    end
+
+    def test_offline_takes_the_newest_cached_rib_of_any_age_and_reports_its_slot
+      Dir.mktmpdir do |dir|
+        all.each { |c| seed(dir, c, "20260801.2000") }
+        seed(dir, "route-views2", "20260918.2000")
+        ribs = RouteViews.resolve_ribs(http: http_with(dir, live: []), offline: true, slot: SLOT)
+        assert_equal all, ribs.keys
+        assert_equal "20260918.2000", ribs.dig("route-views2", :slot)
+        assert_equal "20260801.2000", ribs.dig("route-views.linx", :slot)
+        assert File.exist?(File.join(dir, RouteViews.cache_key("route-views2", "20260801.2000"))), "offline never prunes"
+      end
+    end
+  end
+end

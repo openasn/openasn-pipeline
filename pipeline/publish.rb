@@ -181,7 +181,7 @@ module OpenASNPipeline
       when "ipverse-as-ip-blocks" then nil
       # RouteViews: the oldest RIB this build compiled from.
       when "routeviews"
-        Sources::ROUTEVIEWS_COLLECTORS.filter_map { |c| http.fetched_at(RouteViews.cache_key(c)) }.min
+        RouteViews.used_keys.filter_map { |k| http.fetched_at(k) }.min
       else
         keys = SOURCE_FETCH_KEYS.fetch(source_id) { return nil }
         keys.filter_map { |k| http.fetched_at(Fetch::KEYS[k]) }.min

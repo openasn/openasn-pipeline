@@ -142,6 +142,18 @@ module OpenASNPipeline
       File.exist?(path) ? path : nil
     end
 
+    # Where `key` lives in the cache (no fetch, no mkdir).
+    def path_for(key) = File.join(@cache_dir, key)
+
+    # Drops a cached file and its conditional-GET state (RouteViews keeps one
+    # RIB per slot and prunes the rest, lib/routeviews.rb).
+    def forget(key)
+      FileUtils.rm_f(path_for(key))
+      @state_lock.synchronize do
+        save_state if @state.delete(key)
+      end
+    end
+
     def fetched_at(key) = @state[key]&.fetched_at
     def sha256(key)     = @state[key]&.sha256
 
