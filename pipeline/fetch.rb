@@ -27,7 +27,8 @@ module OpenASNPipeline
       x4b_vpn_asn: "x4bnet/input-vpn-ASN.txt",
       x4b_dc_asn: "x4bnet/input-datacenter-ASN.txt",
       bad_asn: "brianhama/bad-asn-list.csv",
-      wikidata: "wikidata/p3797-names.json"
+      wikidata: "wikidata/p3797-names.json",
+      wikidata_countries: "wikidata/p17-p159-countries.json"
     }.freeze
 
     module_function
@@ -52,13 +53,16 @@ module OpenASNPipeline
 
       # CC0 org names (D-SRC-2). One SPARQL GET; keep-last-good like the rest.
       paths[:wikidata] = http.fetch(Sources::WIKIDATA_P3797_URL, KEYS[:wikidata], offline: offline)
+      # CC0 per-ASN country (D-SRC-2, country): P17/P159 of the same items.
+      paths[:wikidata_countries] = http.fetch(Sources::WIKIDATA_COUNTRIES_URL, KEYS[:wikidata_countries], offline: offline)
 
       # Cheap sanity floor: catch an upstream serving an error page / empty
       # body with HTTP 200 before we waste a build on it. Real validation
       # gates run later (validate.rb); this is just "is it plausibly data".
       min_bytes = { sapics_v4: 5_000_000, sapics_v6: 1_000_000, as_json: 10_000_000,
                     x4b_vpn: 50_000, x4b_dc: 200_000, x4b_vpn_asn: 100,
-                    x4b_dc_asn: 5_000, bad_asn: 5_000, wikidata: 100_000 }
+                    x4b_dc_asn: 5_000, bad_asn: 5_000, wikidata: 100_000,
+                    wikidata_countries: 50_000 }
       min_bytes.each do |key, floor|
         size = File.size(paths[key])
         Env.fail_stage!("#{key} suspiciously small: #{size} bytes (< #{floor})") if size < floor

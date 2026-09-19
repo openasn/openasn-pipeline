@@ -26,6 +26,8 @@ require_relative "lib/overrides"
 require_relative "lib/sources"
 require_relative "lib/http"
 require_relative "lib/orgs"
+require_relative "lib/countries"
+require_relative "lib/wikidata_countries"
 require_relative "normalize" # for sanitize_overlaps! after gap-filling
 
 module OpenASNPipeline
@@ -68,6 +70,10 @@ module OpenASNPipeline
       # ipverse descriptions are WHOIS-derived and never reach this file.
       org_names = Orgs.merge(overrides.org_names, normalized[:wikidata_names])
       Orgs.write(orgs_path, org_names)
+      # Per-ASN country for asn-categories.csv (D-SRC-2, country): CC0 only,
+      # asn_country.txt, then Wikidata. ipverse's RIR countryCode never gets here.
+      countries = Countries.merge(overrides.countries,
+                                  WikidataCountries.for_asns(normalized[:wikidata_names], normalized[:wikidata_countries]))
 
       Env.log("compiled: ipv4 #{File.size(v4_path) / 1024}KB (#{base_v4.length} base, " \
               "#{normalized[:vpn_v4].length} vpn, #{normalized[:dc_v4].length} dc) | " \
@@ -75,7 +81,7 @@ module OpenASNPipeline
 
       { build_ts: build_ts, v4_path: v4_path, v6_path: v6_path, orgs_path: orgs_path,
         base_v4: base_v4, base_v6: base_v6,
-        flags_by_asn: flags_by_asn, overrides: overrides, org_names: org_names }
+        flags_by_asn: flags_by_asn, overrides: overrides, org_names: org_names, countries: countries }
     end
 
     # ASN -> u16 flags. Only ASNs that end up nonzero are stored; the

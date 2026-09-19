@@ -154,11 +154,12 @@ module OpenASNPipeline
         meta = { 15_169 => AsJson::Record.new(15_169, "GOOGLE - WHOIS DESCR", "US", "hosting", "content_network"),
                  64_500 => AsJson::Record.new(64_500, "SOME WHOIS DESCR", "DE", "isp", "access_provider") }
         Publish.write_asn_categories_csv({ asn_meta: meta },
-                                         { flags_by_asn: Hash.new(0), org_names: { 15_169 => { "name" => "Google" } } })
+                                         { flags_by_asn: Hash.new(0), org_names: { 15_169 => { "name" => "Google" } },
+                                           countries: { 15_169 => { "cc" => "US", "source" => "override" } } })
         rows = CSV.read(File.join(dir, "asn-categories.csv"))
         assert_equal %w[asn org country category network_role openasn_flags], rows[0]
         assert_equal ["15169", "Google", "US"], rows[1][0, 3]
-        assert_equal ["64500", nil, "DE"], rows[2][0, 3]
+        assert_equal ["64500", nil, nil], rows[2][0, 3] # registry country "DE" never published (D-SRC-2, country)
         refute_includes File.read(File.join(dir, "asn-categories.csv")), "WHOIS DESCR"
       ensure
         silence { OpenASNPipeline.const_set(:DIST_DIR, old) }

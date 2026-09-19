@@ -13,12 +13,15 @@
 #   x4b_vpn_asns / x4b_dc_asns : Set[Integer] (crosscheck reference + seeds)
 #   wikidata_names    : { asn => { "name", "qid" } } (CC0 org names, D-SRC-2)
 #   wikidata_stats    : admissibility counts (manifest stats)
+#   wikidata_countries: { qid => { "cc", "via" } } (CC0 country, D-SRC-2 country)
+#   wikidata_country_stats : statement-rule counts (manifest stats)
 
 require "set"
 require_relative "lib/env"
 require_relative "lib/ipmath"
 require_relative "lib/asjson"
 require_relative "lib/wikidata_names"
+require_relative "lib/wikidata_countries"
 require_relative "fetch"
 
 module OpenASNPipeline
@@ -40,6 +43,7 @@ module OpenASNPipeline
       out[:x4b_dc_asns]  = parse_x4b_asn_file(paths[:x4b_dc_asn])
 
       out[:wikidata_names], out[:wikidata_stats] = parse_wikidata(paths[:wikidata])
+      out[:wikidata_countries], out[:wikidata_country_stats] = parse_wikidata_countries(paths[:wikidata_countries])
 
       out
     end
@@ -119,7 +123,17 @@ module OpenASNPipeline
       Env.fail_stage!("wikidata P3797: unparseable response (#{e.message}) - did the endpoint return an error page?")
     end
 
-    def parse_cidr_list(path, label)
+# Same failure policy as parse_wikidata.
+def parse_wikidata_countries(path)
+  items, stats = WikidataCountries.parse(File.read(path))
+  dropped = stats.except("statements", "items_with_country").map { |k, v| "#{k}=#{v}" }.join(", ")
+  Env.log("wikidata P17/P159: #{stats['statements']} statements -> #{items.size} items with one country (dropped: #{dropped})")
+  [items, stats]
+rescue JSON::ParserError, ArgumentError => e
+  Env.fail_stage!("wikidata P17/P159: unparseable response (#{e.message}) - did the endpoint return an error page?")
+end
+
+def parse_cidr_list(path, label)
       ranges = []
       bad = 0
       File.foreach(path) do |line|

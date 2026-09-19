@@ -19,6 +19,9 @@
 #       Skipped with a log line on the first build ever.
 #   G6. Org-names sidecar: sentinel ASNs resolve, and its entry count is
 #       drift-gated (LAYER_POLICY) against the previous build and weekly pins.
+#   G7. Per-ASN country (asn-categories.csv): sentinel ASNs carry their
+#       curated country, and the count of non-empty countries is drift-gated
+#       (LAYER_POLICY) like G6. D-SRC-2 (country).
 #   G5. Spot-check panel (spotchecks.yml) passes 100%. The panel is a
 #       tripwire, not gospel: update expectations only via reviewed PR with
 #       a reason (routing changes happen - e.g. an IP moving providers).
@@ -60,6 +63,7 @@ module OpenASNPipeline
       check_deltas!(artifacts, previous_stats, baseline_stats)
       run_spotchecks!(artifacts)
       check_orgs!(compiled, previous_stats, baseline_stats)
+      check_countries!(compiled, previous_stats, baseline_stats)
 
       Env.log("validate: all gates green")
       artifacts
@@ -94,6 +98,31 @@ module OpenASNPipeline
         now: File.binread(path, 16)[8, 4].unpack1("N"),
         prev: previous_stats && previous_stats["org_names"],
         baselines: DriftGate.baselines_from(pins) { |s| s["org_names"] },
+        policy: LAYER_POLICY
+      )
+    end
+
+    # G7: since D-SRC-2 (country) the `country` column is CC0-only
+    # (asn_country.txt, then Wikidata). The sentinels come from the
+    # hand-curated head of asn_country.txt, so a miss means that file failed
+    # to load or lost its head, not an upstream blip. The count is drift-gated
+    # like the org names; a metric absent from the previous manifest SKIPs.
+    COUNTRY_SENTINELS = { 15_169 => "US", 13_335 => "US", 3352 => "ES" }.freeze
+
+    def check_countries!(compiled, previous_stats = nil, baseline_stats = [])
+      countries = compiled[:countries] || {}
+      COUNTRY_SENTINELS.each do |asn, cc|
+        got = countries.dig(asn, "cc")
+        Env.fail_stage!("G7: country for AS#{asn} is #{got.inspect}, expected #{cc.inspect}") unless got == cc
+      end
+
+      pins = baseline_stats.select { |p| p.stats["countries"] }
+      DriftGate.enforce!(
+        gate: "G7",
+        metric: "countries",
+        now: countries.size,
+        prev: previous_stats && previous_stats["countries"],
+        baselines: DriftGate.baselines_from(pins) { |s| s["countries"] },
         policy: LAYER_POLICY
       )
     end

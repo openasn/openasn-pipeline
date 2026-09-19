@@ -23,6 +23,14 @@
 # took out of the core. These ASNs are NOT flag members: org_names never feeds
 # all_asns (no gap-fill, no classification effect).
 #
+# asn_country.txt format (one ASN per line; the published `country` column):
+#   AS15169  US  # src: https://about.google/intl/en/locations/ (2026-09-19)
+# ISO 3166-1 alpha-2, upper case: the country the ASN's operator is based in
+# (seat or headquarters), written down from the cited source. Same source rule
+# as org_names.txt: a registry/aggregator host fails the build, because a
+# country resting on WHOIS or RIR stats is exactly what D-SRC-2 (country) took
+# out of the core. Not a flag file: no classification effect, never in all_asns.
+#
 # corrections.yml format (asn -> correction):
 #   64496:
 #     category: hosting          # one of: isp hosting business education_research
@@ -53,9 +61,14 @@ module OpenASNPipeline
     VALID_ROLES      = (AsJson::ROLE_CODES.keys.compact + ["none"]).freeze
 
     ORG_NAMES_FILE = "org_names.txt"
+    COUNTRY_FILE = "asn_country.txt"
+    ISO2 = /\A[A-Z]{2}\z/
+    # User-assigned / reserved codes that name no country (XX is ipverse's
+    # "unknown", ZZ the RIRs', EU/AP the RIRs' regional pseudo-codes).
+    NOT_COUNTRIES = %w[XX ZZ EU AP AA QM QN QO QP QQ QR QS QT QU QV QW QX QY QZ].freeze
     MAX_ORG_NAME_CHARS = 200
 
-    attr_reader :sets, :corrections, :org_names
+    attr_reader :sets, :corrections, :org_names, :countries
 
     def self.load(dir = Env.overrides_dir)
       new(dir)
@@ -66,6 +79,7 @@ module OpenASNPipeline
       @sets = FLAG_FILES.transform_values { |file| parse_asn_file(File.join(dir, file)) }
       @corrections = parse_corrections(File.join(dir, "corrections.yml"))
       @org_names = parse_org_names(File.join(dir, ORG_NAMES_FILE))
+      @countries = parse_countries(File.join(dir, COUNTRY_FILE))
       sanity_check!
     end
 
@@ -124,6 +138,35 @@ def parse_org_names(path)
   end
   out
 end
+
+    # -> { asn => { "cc" => "US", "src" => url } }
+    def parse_countries(path)
+      return {} unless File.exist?(path)
+
+      out = {}
+      File.foreach(path, encoding: "UTF-8").with_index(1) do |line, lineno|
+        stripped = line.strip
+        next if stripped.empty? || stripped.start_with?("#")
+
+        where = "#{COUNTRY_FILE}:#{lineno}"
+        unless (m = stripped.match(/\AAS(\d+)\s+(\S+)\s+#\s*(.+)\z/))
+          Env.fail_stage!("#{where}: expected `AS<number>  <CC>  # src: <url> (<date>)`, got: #{stripped.inspect}")
+        end
+        asn, cc, comment = m[1].to_i, m[2], m[3]
+        if !cc.match?(ISO2) || NOT_COUNTRIES.include?(cc)
+          Env.fail_stage!("#{where}: AS#{asn} country #{cc.inspect} is not an ISO 3166-1 alpha-2 country code")
+        end
+        url = comment[%r{https?://\S+}]
+        Env.fail_stage!("#{where}: AS#{asn} has no source URL - every country must be traceable") unless url
+        if WikidataNames.restricted_url?(url)
+          Env.fail_stage!("#{where}: AS#{asn} cites #{url}, a registry/aggregator host - a country must rest on a " \
+                          "first-party or CC0 source (D-SRC-2, country), never on WHOIS, RIR stats or their repackagers")
+        end
+        Env.fail_stage!("#{where}: duplicate AS#{asn}") if out.key?(asn)
+        out[asn] = { "cc" => cc, "src" => url }
+      end
+      out
+    end
 
     def parse_corrections(path)
       return {} unless File.exist?(path)

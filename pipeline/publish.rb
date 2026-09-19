@@ -28,6 +28,7 @@ require_relative "lib/env"
 require_relative "lib/asjson"
 require_relative "lib/binary"
 require_relative "lib/orgs"
+require_relative "lib/countries"
 require_relative "lib/sources"
 require_relative "lib/license_gate"
 require_relative "lib/drift_gate"
@@ -59,16 +60,20 @@ module OpenASNPipeline
     # Wikidata; D-SRC-2) and is EMPTY when we hold no clean name. It is never
     # the ipverse description, which is bulk WHOIS. The header and column
     # order are unchanged on purpose, so positional readers keep working.
+    #
+    # `country` is the CC0 country (asn_country.txt, then Wikidata; D-SRC-2,
+    # country): where the ASN's operator is based. It is EMPTY when we hold no
+    # clean value, and never ipverse's countryCode, which is RIR registry data.
     def write_asn_categories_csv(normalized, compiled)
       flags_by_asn = compiled[:flags_by_asn]
       org_names = compiled[:org_names] || {}
+      countries = compiled[:countries] || {}
       path = File.join(DIST_DIR, "asn-categories.csv")
       CSV.open("#{path}.tmp", "wb") do |csv|
         csv << %w[asn org country category network_role openasn_flags]
         normalized[:asn_meta].keys.sort.each do |asn|
-          rec = normalized[:asn_meta][asn]
           flags = flags_by_asn[asn]
-          csv << [asn, org_names.dig(asn, "name"), rec.country,
+          csv << [asn, org_names.dig(asn, "name"), countries.dig(asn, "cc"),
                   AsJson::CATEGORY_NAMES[flags & Binary::CATEGORY_MASK],
                   AsJson::ROLE_NAMES[(flags & Binary::ROLE_MASK) >> Binary::ROLE_SHIFT],
                   flag_names(flags).join("|")]
@@ -124,7 +129,8 @@ module OpenASNPipeline
         build_id: build_id,
         files: files,
         sources: sources,
-        stats: manifest_stats(artifacts, crosscheck_stats, org_stats: org_stats(compiled, normalized)),
+        stats: manifest_stats(artifacts, crosscheck_stats,
+                              org_stats: org_stats(compiled, normalized).merge(country_stats(compiled, normalized))),
         signature: nil
       }
 
@@ -161,7 +167,18 @@ module OpenASNPipeline
         wikidata_p3797: normalized[:wikidata_stats] }
     end
 
-    def records_for(name, artifacts, path)
+# country_stats (D-SRC-2, country): `countries` is the number of non-empty
+# `country` cells in asn-categories.csv, drift-gated by G7;
+# `countries_by_source` and `wikidata_countries` say where they came from
+# and what the Wikidata statement rules dropped.
+def country_stats(compiled, normalized)
+  counts = Countries.source_counts(compiled[:countries] || {})
+  { countries: counts["total"],
+    countries_by_source: counts.except("total"),
+    wikidata_countries: normalized[:wikidata_country_stats] }
+end
+
+def records_for(name, artifacts, path)
       case name
       when "openasn-ipv4.bin" then artifacts[:ipv4].counts[:base]
       when "openasn-ipv6.bin" then artifacts[:ipv6].counts[:base]
@@ -182,7 +199,7 @@ module OpenASNPipeline
       "ipverse-as-metadata"    => %i[as_json],
       "x4bnet-lists_vpn"       => %i[x4b_vpn x4b_dc x4b_vpn_asn x4b_dc_asn],
       "brianhama-bad-asn-list" => %i[bad_asn],
-      "wikidata-p3797"         => %i[wikidata]
+      "wikidata-p3797"         => %i[wikidata wikidata_countries]
     }.freeze
 
     # Honest provenance only (this used to default to Time.now for anything
