@@ -221,6 +221,24 @@ module OpenASNPipeline
         Countries.check_territories!(tagged, { 201_776 => { "cc" => "RU", "source" => "wikidata:Q133119943:P17" } })
       end
     end
+
+    # CD-25: the guard binds operators SEATED in a territory (tagged lines),
+    # not operators seated elsewhere that run a network there. K-Telecom
+    # (Krasnodar, Russia; network in occupied Crimea) is an untagged RU line
+    # and publishes RU, even if a Wikidata item placed it in Crimea.
+    def test_an_operator_seated_outside_a_territory_keeps_its_seat_country
+      line = "AS203451  RU  # src: https://en.wikipedia.org/wiki/K-Telecom " \
+             "(\"Krasnodar, Russia\"; network in occupied Crimea) (2026-09-19)\n"
+      override = Dir.mktmpdir do |dir|
+        File.write(File.join(dir, "asn_country.txt"), line)
+        Overrides.load(dir).countries
+      end
+      assert_equal({ "cc" => "RU", "src" => "https://en.wikipedia.org/wiki/K-Telecom" }, override[203_451])
+      wd = { 203_451 => { "cc" => "UA", "qid" => "Q113412240", "via" => "territory" } }
+      merged = Countries.merge(override, wd)
+      assert_equal({ "cc" => "RU", "source" => "override" }, merged[203_451])
+      Countries.check_territories!(override, merged) # no StageFailure
+    end
   end
 
   # The legal guard itself: an RIR country sitting in asn_meta must not appear

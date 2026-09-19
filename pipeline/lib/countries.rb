@@ -29,6 +29,10 @@
 # line `# territory: <key>; src: ...`; the key must be one of TERRITORY_STATES
 # and the code must be that state, or the build fails. The de facto
 # controller is recorded in the enrichment dossier, not here.
+#
+# The guard binds operators SEATED in a territory. An operator seated
+# elsewhere that runs a network there (K-Telecom AS203451: Krasnodar, network
+# in occupied Crimea) publishes its seat country on an untagged line (CD-25).
 
 require_relative "env"
 
