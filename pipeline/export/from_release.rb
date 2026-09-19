@@ -74,7 +74,7 @@ module OpenASNPipeline
           snapshot: snapshot,
           sources: verify_sources!(manifest, input),
           attribution: File.read(paths.fetch("ATTRIBUTION.md")),
-          producer: Metadata.producer_versions(python: Sqlite.interpreter)
+          producer: Run.producer(mode: mode)
         )
 
         FileUtils.mkdir_p(output)

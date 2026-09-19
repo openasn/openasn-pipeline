@@ -12,8 +12,10 @@
 # anything inside ::ffff:0:0/96 as an embedded dotted quad - measured on
 # ruby 3.4.2, `IPAddr.new(0x...ffff_0808_0808, AF_INET6).to_s` is
 # "::ffff:8.8.8.8" - and §11 requires pure hextets. IPMath.int_to_v6 is
-# built on IPAddr and inherits the defect, so CSV emission cannot use
-# either. What follows is RFC 5952 §4 spelled out: lowercase, no leading
+# built on IPAddr and inherits that formatting choice, so CSV emission cannot
+# use either. Mixed notation is valid IPv6 (and recommended for mapped addresses
+# by RFC 5952 §5); this is our pure-hex serialization policy, not a Ruby bug.
+# What follows is RFC 5952 §4 spelled out: lowercase, no leading
 # zeros, compress the LONGEST run of two or more zero hextets, leftmost on
 # a tie, never compress a single zero hextet, all-zero is "::".
 #

@@ -576,22 +576,14 @@ module OpenASNPipeline
 
         stamped = JSON.parse(JSON.parse(File.read(File.join(root, "generation-1", EXPORT_DIR,
                                                             Export::Run::METADATA_NAME))).fetch("producer"))
-        # The toolchain this mode ACTUALLY uses, resolved through the same
-        # function the nightly build resolves it with. It is recorded beside
-        # the one the reproduction stamped because the two can disagree:
-        # Export::FromRelease asks Metadata.producer_versions for the Python
-        # interpreter only, so a mode-`all` reproduction writes an MMDB file
-        # and then describes itself as having used no Go toolchain. That is a
-        # provenance gap in the reproduction path (the publishing path goes
-        # through Export::Run.producer and is complete), and CI says so out
-        # loud rather than quietly printing the fuller of the two.
+        # The embedded producer must describe every tool this mode used.
+        # Repeatable bytes with missing tool provenance are not sufficient.
         effective = Export::Run.producer(mode: resolved.selected)
         missing = effective.reject { |key, value| value.nil? || stamped[key] == value }
         unless missing.empty?
-          Env.warn("export CI: the reproduced metadata records #{missing.keys.join(', ')} as " \
+          Env.fail_stage!("export CI: the reproduced metadata records #{missing.keys.join(', ')} as " \
                    "#{missing.keys.map { |k| stamped[k].inspect }.join(', ')} although this mode used " \
-                   "#{missing.values.map(&:inspect).join(', ')}. Byte reproduction is still scoped to the " \
-                   "toolchain recorded here, not to the one the file claims.")
+                   "#{missing.values.map(&:inspect).join(', ')}. Producer metadata must match the tools used.")
         end
         differing = (first["payloads"].keys | second["payloads"].keys).reject do |name|
           first["payloads"][name] == second["payloads"][name]
