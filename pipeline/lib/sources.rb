@@ -14,6 +14,7 @@
 
 require_relative "env"
 require_relative "http"
+require_relative "wikidata_names"
 
 module OpenASNPipeline
   module Sources
@@ -92,8 +93,15 @@ module OpenASNPipeline
     ROUTEVIEWS_LICENSE = { url: ROUTEVIEWS_LICENSE_URL, extract: :wp_json_rendered_text }.freeze
     ROUTEVIEWS_CATALOG = { id: "routeviews", url: "https://www.routeviews.org/", license: "CC-BY-4.0" }.freeze
 
-    # --- ipverse/as-metadata: ASN -> description/country/category/role -------
-    # CC0 1.0 (LICENSE pinned below). The `category`/`networkRole` fields
+    # --- ipverse/as-metadata: ASN -> country/category/role --------------------
+    # CC0 1.0 (LICENSE pinned below). Its `description` field is NOT
+    # published (data-repo DECISIONS.md D-SRC-2, org names). The field is bulk
+    # RIR WHOIS `descr`, which APNIC, ARIN and RIPE forbid republishing in bulk,
+    # and ipverse's CC0 cannot license data it does not own. Clients that want
+    # those names fetch ipverse's as.csv themselves via the `ipverse_org_names`
+    # Tier B recipe in the data repo's fetch-manifest.json.
+    #
+    # The `category`/`networkRole` fields
     # exist ONLY in as.json (~69MB), NOT in as.csv (verified 2026-07-04:
     # csv header is asn,handle,description,country-code) - so we must
     # stream-parse the JSON. Fields are young (added 2026-02-08) and
@@ -145,6 +153,13 @@ module OpenASNPipeline
       "input/datacenter/ips/protonvpn.txt" => "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/datacenter/ips/protonvpn.txt"
     }.freeze
 
+    # --- Wikidata P3797: ASN -> operator item label (CC0) --------------------
+    # The CC0 half of the published org names. lib/wikidata_names.rb holds the
+    # admissibility rules: a statement whose only references are RIR bulk or
+    # WHOIS data, or aggregators of it, is dropped. One SPARQL GET per build,
+    # cached with keep-last-good like every other input.
+    WIKIDATA_P3797_URL = WikidataNames.url
+
     # --- brianhama/bad-asn-list: curated hosting/cloud/colo ASNs --------------
     # MIT, first-party curation (~700+ ASNs). Also the market thesis: its
     # author ran a 500K-MAU network and found ASN-blocking solved ~90% of
@@ -185,6 +200,13 @@ module OpenASNPipeline
       "brianhama-bad-asn-list" => {
         url: "https://raw.githubusercontent.com/brianhama/bad-asn-list/master/LICENSE",
         extract: :whole_file
+      },
+      # Wikidata has no LICENSE file. The grant is the first sentence of the
+      # Wikidata:Copyright policy page, pinned from its raw wikitext
+      # (license_gate.rb, :wikidata_cc0).
+      "wikidata-p3797" => {
+        url: "https://www.wikidata.org/w/index.php?title=Wikidata:Copyright&action=raw",
+        extract: :wikidata_cc0
       }
     }.freeze
     SAPICS_LICENSE = {
@@ -234,6 +256,7 @@ module OpenASNPipeline
       { id: "ipverse-as-ip-blocks",  url: "https://github.com/ipverse/as-ip-blocks",  license: "CC0-1.0" },
       { id: "x4bnet-lists_vpn",      url: "https://github.com/X4BNet/lists_vpn",      license: "MIT" },
       { id: "brianhama-bad-asn-list", url: "https://github.com/brianhama/bad-asn-list", license: "MIT" },
+      { id: "wikidata-p3797",        url: "https://www.wikidata.org/wiki/Property:P3797", license: "CC0-1.0" },
       { id: "openasn-overrides",     url: "https://github.com/openasn/openasn",       license: "CC0-1.0" }
     ].freeze
     SAPICS_CATALOG = { id: "sapics-origin-asn", url: "https://github.com/sapics/ip-location-db", license: "PDDL-1.0" }.freeze

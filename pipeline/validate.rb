@@ -20,7 +20,8 @@
 #   G5. Spot-check panel (spotchecks.yml) passes 100%. The panel is a
 #       tripwire, not gospel: update expectations only via reviewed PR with
 #       a reason (routing changes happen - e.g. an IP moving providers).
-#   G6. The orgs sidecar resolves well-known ASNs to plausible names.
+#   G6. Org-names sidecar: sentinel ASNs resolve, and its entry count is
+#       drift-gated (LAYER_POLICY) against the previous build and weekly pins.
 #   G7. The ASSEMBLED CANDIDATE is complete and internally consistent: every
 #       registered asset is still the bytes it was registered as, the
 #       manifest and SHA256SUMS describe exactly the registry (and never
@@ -66,7 +67,7 @@ module OpenASNPipeline
       end
       check_deltas!(artifacts, previous_stats, baseline_stats)
       run_spotchecks!(artifacts)
-      check_orgs!(compiled)
+      check_orgs!(compiled, previous_stats, baseline_stats)
 
       Env.log("validate: all gates green")
       artifacts
@@ -141,17 +142,37 @@ module OpenASNPipeline
       end
     end
 
-    # G6: the orgs sidecar must resolve well-known ASNs to plausible names.
-    def check_orgs!(compiled)
+    # G6: the orgs sidecar must resolve well-known ASNs to plausible names,
+    # and its entry count is drift-gated like the layer counts (D-GATE-1).
+    # Since D-SRC-2 the names are CC0-only (org_names.txt + Wikidata), so the
+    # sentinels are ASNs whose names come from our own sourced org_names.txt;
+    # a missing sentinel means that file failed to load, not an upstream blip.
+    # The Telefonica pattern accepts the accented spelling, which is what the
+    # operator itself uses.
+    ORG_SENTINELS = { 15_169 => /google/i, 13_335 => /cloudflare/i, 3352 => /telef[oó]nica/i }.freeze
+
+    def check_orgs!(compiled, previous_stats = nil, baseline_stats = [])
       path = compiled[:orgs_path]
       Env.fail_stage!("G6: orgs artifact missing") unless path && File.exist?(path)
 
-      { 15_169 => /google/i, 13_335 => /cloudflare/i, 3352 => /telefonica/i }.each do |asn, pattern|
+      ORG_SENTINELS.each do |asn, pattern|
         name = Orgs.read(path, asn)
         next if name&.match?(pattern)
 
         Env.fail_stage!("G6: orgs lookup for AS#{asn} returned #{name.inspect}, expected #{pattern.inspect}")
       end
+
+      # A metric the previous manifest does not carry (first build after
+      # D-SRC-2) is a SKIP, loudly, inside DriftGate - never a -100% FAIL.
+      pins = baseline_stats.select { |p| p.stats["org_names"] }
+      DriftGate.enforce!(
+        gate: "G6",
+        metric: "org_names",
+        now: File.binread(path, 16)[8, 4].unpack1("N"),
+        prev: previous_stats && previous_stats["org_names"],
+        baselines: DriftGate.baselines_from(pins) { |s| s["org_names"] },
+        policy: LAYER_POLICY
+      )
     end
 
     def check_size!(family, compiled)

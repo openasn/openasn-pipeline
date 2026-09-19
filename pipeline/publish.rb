@@ -41,6 +41,7 @@ require "digest"
 require_relative "lib/env"
 require_relative "lib/asjson"
 require_relative "lib/binary"
+require_relative "lib/orgs"
 require_relative "lib/release_assets"
 require_relative "lib/sources"
 require_relative "lib/routeviews"
@@ -78,15 +79,21 @@ module OpenASNPipeline
 
     # The convenience CSV: everything an analyst needs without parsing
     # binary. CC0, same as the artifacts.
+    #
+    # `org` is the CC0 name from openasn-orgs.bin (org_names.txt, then
+    # Wikidata; D-SRC-2) and is EMPTY when we hold no clean name. It is never
+    # the ipverse description, which is bulk WHOIS. The header and column
+    # order are unchanged on purpose, so positional readers keep working.
     def write_asn_categories_csv(normalized, compiled, dir: DIST_DIR)
       flags_by_asn = compiled[:flags_by_asn]
+      org_names = compiled[:org_names] || {}
       path = File.join(dir, "asn-categories.csv")
       CSV.open("#{path}.tmp", "wb") do |csv|
         csv << %w[asn org country category network_role openasn_flags]
         normalized[:asn_meta].keys.sort.each do |asn|
           rec = normalized[:asn_meta][asn]
           flags = flags_by_asn[asn]
-          csv << [asn, rec.description, rec.country,
+          csv << [asn, org_names.dig(asn, "name"), rec.country,
                   AsJson::CATEGORY_NAMES[flags & Binary::CATEGORY_MASK],
                   AsJson::ROLE_NAMES[(flags & Binary::ROLE_MASK) >> Binary::ROLE_SHIFT],
                   flag_names(flags).join("|")]
@@ -147,7 +154,7 @@ module OpenASNPipeline
 
       manifest = manifest_document(
         build_id: context.build_id, registry: registry, sources: context.sources,
-        stats: manifest_stats(artifacts, crosscheck_stats, exports: exports),
+        stats: manifest_stats(artifacts, crosscheck_stats, exports: exports, org_stats: org_stats(compiled)),
         export_producer: export_producer(context, exports)
       )
       write_manifest(manifest, dir: dir)
@@ -247,7 +254,11 @@ module OpenASNPipeline
     # different thing and live in `export_counts` (PRD §15.3). Swapping them
     # would silently rebase every drift gate that compares layer counts
     # across builds.
-    def manifest_stats(artifacts, crosscheck_stats, exports: nil)
+    # org_stats (D-SRC-2): `org_names` is the entry count of openasn-orgs.bin,
+    # the metric G6's drift gate compares night over night;
+    # `org_names_by_source` and `wikidata_p3797` say where the names came from
+    # and what the Wikidata admissibility rules dropped. Omitted when nil.
+    def manifest_stats(artifacts, crosscheck_stats, exports: nil, org_stats: nil)
       stats = {
         layer_counts: {
           base_ipv4: artifacts[:ipv4].counts[:base],
@@ -257,7 +268,7 @@ module OpenASNPipeline
         }
       }
       stats[:export_counts] = export_counts(exports) if exports&.counts
-      stats.merge(crosscheck_stats || {}).merge(DriftGate.manifest_stamp).merge(RouteViews.manifest_stamp)
+      stats.merge(crosscheck_stats || {}).merge(org_stats || {}).merge(DriftGate.manifest_stamp).merge(RouteViews.manifest_stamp)
     end
 
     # Coalesced effective intervals, per family and in total, plus the
@@ -276,6 +287,13 @@ module OpenASNPipeline
              uncompressed_bytes: output.export.dig("uncompressed", "bytes") }.compact]
         end
       }
+    end
+
+    def org_stats(compiled)
+      counts = Orgs.source_counts(compiled[:org_names] || {})
+      { org_names: counts["total"],
+        org_names_by_source: counts.except("total"),
+        wikidata_p3797: compiled[:wikidata_stats] }
     end
 
     def records_for(name, artifacts, path)
@@ -317,7 +335,8 @@ module OpenASNPipeline
       "sapics-origin-asn"      => %i[sapics_v4 sapics_v6],
       "ipverse-as-metadata"    => %i[as_json],
       "x4bnet-lists_vpn"       => %i[x4b_vpn x4b_dc x4b_vpn_asn x4b_dc_asn x4b_vpn_manual x4b_dc_manual],
-      "brianhama-bad-asn-list" => %i[bad_asn]
+      "brianhama-bad-asn-list" => %i[bad_asn],
+      "wikidata-p3797"         => %i[wikidata]
     }.freeze
 
     # Honest provenance only (this used to default to Time.now for anything

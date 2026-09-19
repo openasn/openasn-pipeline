@@ -71,7 +71,10 @@ module OpenASNPipeline
                    base_rows: base_v6, vpn_rows: [], dc_rows: [])
       # Org names ship as an optional sidecar (clients fetch it on refresh;
       # it is deliberately NOT part of the gem's bundled seed - size budget).
-      Orgs.write(orgs_path, normalized[:asn_meta])
+      # CC0 sources only: our sourced org_names.txt, then Wikidata (D-SRC-2).
+      # ipverse descriptions are WHOIS-derived and never reach this file.
+      org_names = Orgs.merge(overrides.org_names, normalized[:wikidata_names])
+      Orgs.write(orgs_path, org_names)
 
       Env.log("compiled: ipv4 #{File.size(v4_path) / 1024}KB (#{base_v4.length} base, " \
               "#{normalized[:vpn_v4].length} vpn, #{normalized[:dc_v4].length} dc) | " \
@@ -79,7 +82,8 @@ module OpenASNPipeline
 
       { build_ts: build_ts, dest: dest, v4_path: v4_path, v6_path: v6_path, orgs_path: orgs_path,
         base_v4: base_v4, base_v6: base_v6,
-        flags_by_asn: flags_by_asn, overrides: overrides }
+        flags_by_asn: flags_by_asn, overrides: overrides, org_names: org_names,
+        wikidata_stats: normalized[:wikidata_stats] }
     end
 
     # ASN -> u16 flags. Only ASNs that end up nonzero are stored; the

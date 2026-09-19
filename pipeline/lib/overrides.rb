@@ -14,6 +14,15 @@
 # File format (one ASN per line):
 #   AS9009  # M247 Europe SRL - NordVPN/major VPN infra. src: https://... (2026-07-04)
 #
+# org_names.txt format (one ASN per line; the published org name, CC0):
+#   AS15169  Google  # src: https://peering.google.com/ (2026-09-19)
+# The name is everything between the ASN and " # ". The source must be a
+# first-party or CC0 page: a registry/aggregator host
+# (WikidataNames::RESTRICTED_REF_HOSTS: RIR WHOIS/RDAP, PeeringDB, CAIDA, ...)
+# fails the build, because a name resting on WHOIS is exactly what D-SRC-2
+# took out of the core. These ASNs are NOT flag members: org_names never feeds
+# all_asns (no gap-fill, no classification effect).
+#
 # corrections.yml format (asn -> correction):
 #   64496:
 #     category: hosting          # one of: isp hosting business education_research
@@ -27,6 +36,7 @@ require "set"
 require "yaml"
 require_relative "env"
 require_relative "asjson"
+require_relative "wikidata_names"
 
 module OpenASNPipeline
   class Overrides
@@ -42,7 +52,10 @@ module OpenASNPipeline
     VALID_CATEGORIES = (AsJson::CATEGORY_CODES.keys.compact + ["none"]).freeze
     VALID_ROLES      = (AsJson::ROLE_CODES.keys.compact + ["none"]).freeze
 
-    attr_reader :sets, :corrections
+    ORG_NAMES_FILE = "org_names.txt"
+    MAX_ORG_NAME_CHARS = 200
+
+    attr_reader :sets, :corrections, :org_names
 
     def self.load(dir = Env.overrides_dir)
       new(dir)
@@ -52,6 +65,7 @@ module OpenASNPipeline
       @dir = dir
       @sets = FLAG_FILES.transform_values { |file| parse_asn_file(File.join(dir, file)) }
       @corrections = parse_corrections(File.join(dir, "corrections.yml"))
+      @org_names = parse_org_names(File.join(dir, ORG_NAMES_FILE))
       sanity_check!
     end
 
@@ -82,6 +96,34 @@ module OpenASNPipeline
       end
       asns
     end
+
+# -> { asn => { "name" => String, "src" => url } }
+def parse_org_names(path)
+  return {} unless File.exist?(path)
+
+  out = {}
+  File.foreach(path, encoding: "UTF-8").with_index(1) do |line, lineno|
+    stripped = line.strip
+    next if stripped.empty? || stripped.start_with?("#")
+
+    where = "#{ORG_NAMES_FILE}:#{lineno}"
+    unless (m = stripped.match(/\AAS(\d+)\s+(.+?)\s+#\s*(.+)\z/))
+      Env.fail_stage!("#{where}: expected `AS<number>  <name>  # src: <url> (<date>)`, got: #{stripped.inspect}")
+    end
+    asn, name, comment = m[1].to_i, m[2].strip, m[3]
+    Env.fail_stage!("#{where}: AS#{asn} name is not valid UTF-8") unless name.valid_encoding?
+    Env.fail_stage!("#{where}: AS#{asn} name longer than #{MAX_ORG_NAME_CHARS} chars") if name.length > MAX_ORG_NAME_CHARS
+    url = comment[%r{https?://\S+}]
+    Env.fail_stage!("#{where}: AS#{asn} has no source URL - every name must be traceable") unless url
+    if WikidataNames.restricted_url?(url)
+      Env.fail_stage!("#{where}: AS#{asn} cites #{url}, a registry/aggregator host - an org name must rest on a " \
+                      "first-party or CC0 source (D-SRC-2), never on WHOIS or its repackagers")
+    end
+    Env.fail_stage!("#{where}: duplicate AS#{asn}") if out.key?(asn)
+    out[asn] = { "name" => name.unicode_normalize(:nfc), "src" => url }
+  end
+  out
+end
 
     def parse_corrections(path)
       return {} unless File.exist?(path)

@@ -191,7 +191,8 @@ module OpenASNPipeline
                                                 "194.5.52.0/23 # VPN Consumer Network Services (https://github.com/X4BNet/lists_vpn/issues/171)\n"),
         x4b_dc_manual: write("dc-manual.txt", "# Manually added netblocks\n# Comment description manditory"),
         x4b_dc_feeds: [write("dc-protonvpn.txt", "203.0.113.9\n")],
-        bad_asn: write("bad.csv", "ASN,Entity\n")
+        bad_asn: write("bad.csv", "ASN,Entity\n"),
+        wikidata: write("wikidata.json", %q({"results":{"bindings":[]}}))
       }
     end
 

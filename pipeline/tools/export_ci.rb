@@ -96,8 +96,6 @@ module OpenASNPipeline
       CATEGORY_CODE = Export::Contract::CATEGORY_BY_CODE.invert.freeze
       ROLE_CODE     = Export::Contract::ROLE_BY_CODE.invert.freeze
 
-      Org = Struct.new(:description)
-
       # AS64504 is deliberately absent: a routed range whose ASN has no org
       # name must export a NULL as_org rather than an empty string.
       ORG_NAMES = {
@@ -213,7 +211,7 @@ module OpenASNPipeline
                          vpn_rows: ipv4_vpn, dc_rows: ipv4_dc)
         Binary.write(v6, family: :ipv6, build_ts: BUILD_TS, base_rows: ipv6_base,
                          vpn_rows: ipv6_vpn, dc_rows: ipv6_dc)
-        Orgs.write(orgs, ORG_NAMES.to_h { |asn, name| [asn, Org.new(name)] })
+        Orgs.write(orgs, ORG_NAMES.to_h { |asn, name| [asn, { "name" => name }] })
         File.write(File.join(dir, "ATTRIBUTION.md"), ATTRIBUTION)
 
         write_release_manifest(dir)

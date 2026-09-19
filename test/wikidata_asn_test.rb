@@ -58,7 +58,9 @@ module OpenASNPipeline
     def test_prototype_is_not_in_the_published_build
       root = File.expand_path("../pipeline", __dir__)
       %w[run.rb compile.rb publish.rb normalize.rb].each do |f|
-        refute_match(/wikidata/i, File.read(File.join(root, f)), "#{f} must not use the Wikidata prototype")
+        # The published org names use lib/wikidata_names.rb (D-SRC-2); the
+        # prototype (lib/wikidata_asn.rb) must stay out of the build.
+        refute_match(/wikidata_asn|WikidataAsn/, File.read(File.join(root, f)), "#{f} must not use the Wikidata prototype")
       end
       assert_includes WikidataAsn.url, "format=json"
     end

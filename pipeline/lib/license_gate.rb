@@ -142,6 +142,15 @@ module OpenASNPipeline
         Env.fail_stage!("#{source_id}: could not extract License section - README structure changed, INVESTIGATE") unless m
 
         "# License#{m[1]}"
+      when :wikidata_cc0
+        # Wikidata:Copyright (raw wikitext) opens with the one sentence that
+        # grants CC0 on structured data. Pin that line alone, so edits
+        # elsewhere on the policy page cannot trip the gate but any edit to the
+        # grant does.
+        line = body.each_line.find { |l| l.start_with?("All structured data from the main") }
+        Env.fail_stage!("#{source_id}: could not find the CC0 grant sentence - Wikidata:Copyright changed, INVESTIGATE") unless line
+
+        line.chomp
       when :wp_json_rendered_text
         # RouteViews: WordPress REST rendering of the licence page. Tags are
         # stripped and whitespace collapsed so only the words are pinned.

@@ -23,6 +23,11 @@ task "licenses:pin" do
   OpenASNPipeline::LicenseGate.pin!(only: only)
 end
 
+desc "Draft data/overrides/org_names.txt lines from enrichment dossiers: rake 'org_names:draft[a.jsonl b.jsonl]'"
+task "org_names:draft", [:paths] do |_t, args|
+  ruby "pipeline/tools/org_names_from_dossiers.rb", *args[:paths].to_s.split(/[\s,]+/)
+end
+
 desc "Verify upstream licenses against pinned hashes without building. SCOPE=tier_a|curation|all (default all; the nightly checks tier_a only)"
 task "licenses:check" do
   require_relative "pipeline/lib/http"

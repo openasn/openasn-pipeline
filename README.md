@@ -29,8 +29,8 @@ The **nightly build workflow lives in the data repo** (`.github/workflows/nightl
 | license gate | `pipeline/lib/license_gate.rb` | SHA-256 of every upstream license text vs pinned hashes; ANY drift fails the build |
 | normalize | `pipeline/normalize.rb` | parse everything into canonical rows; overlap sanitizer; strip the third-party feeds X4B merges into its overlays (`lib/x4b_first_party.rb`) |
 | crosscheck | `pipeline/crosscheck.rb` | ipverse category quality vs the X4B ∪ bad-asn reference set; drift alarms |
-| compile | `pipeline/compile.rb` | flags, corrections, gap-fill via as-ip-blocks, pack OASN v1 + OORG v1 |
-| validate | `pipeline/validate.rb` | round-trip re-find, size sanity, ±20% deltas, the spot panel, orgs checks |
+| compile | `pipeline/compile.rb` | flags, corrections, gap-fill via as-ip-blocks, pack OASN v1 + OORG v1 (CC0 names only: `org_names.txt` + Wikidata P3797) |
+| validate | `pipeline/validate.rb` | round-trip re-find, size sanity, ±20% deltas, the spot panel, orgs sentinels + org-count drift (G6) |
 | prepare | `pipeline/publish.rb` | convenience CSV, repo docs, and the source catalogue built ONCE for everything downstream |
 | project + spool | `pipeline/export/project.rb`, `spool.rb` | sweep the native layers into coalesced effective intervals with a core-v1 verdict each |
 | export writers | `pipeline/export/{csv,sqlite,mmdb}.rb` | `openasn.csv.gz`, `openasn.sqlite.gz`, `openasn.mmdb` from that one spool |

@@ -12,12 +12,15 @@
 #                       X4B's third-party feeds removed (lib/x4b_first_party.rb)
 #   bad_asns          : Set[Integer]
 #   x4b_vpn_asns / x4b_dc_asns : Set[Integer] (crosscheck reference + seeds)
+#   wikidata_names    : { asn => { "name", "qid" } } (CC0 org names, D-SRC-2)
+#   wikidata_stats    : admissibility counts (manifest stats)
 
 require "set"
 require_relative "lib/env"
 require_relative "lib/ipmath"
 require_relative "lib/asjson"
 require_relative "lib/x4b_first_party"
+require_relative "lib/wikidata_names"
 require_relative "fetch"
 
 module OpenASNPipeline
@@ -57,11 +60,14 @@ module OpenASNPipeline
       X4BFirstParty.log("x4b datacenter", res)
       out[:dc_v4] = res.ranges
 
+      out[:wikidata_names], out[:wikidata_stats] = parse_wikidata(paths[:wikidata])
+
       out
     end
 
     # sapics -num CSVs: start_int,end_int,asn,"AS Name". We take the integers
-    # and the ASN; org names come from ipverse (richer + categorized).
+    # and the ASN only. The AS-name column has undisclosed provenance and is
+    # never read (published org names: org_names.txt + Wikidata, D-SRC-2).
     # The 4th column may contain commas inside quotes - split with a limit
     # so we never pay CSV-quote parsing for 559k rows we don't read.
     def parse_origin_asn(path, max_addr, label)
@@ -121,6 +127,17 @@ module OpenASNPipeline
               "(hosting=#{meta.count { |_, r| r.category == 'hosting' }}, " \
               "isp=#{meta.count { |_, r| r.category == 'isp' }})")
       meta
+    end
+
+    # A body that is not SPARQL JSON is breakage, not an empty answer: fail
+    # loudly. HTTP errors were already absorbed at fetch time (keep-last-good).
+    def parse_wikidata(path)
+      names, stats = WikidataNames.parse(File.read(path))
+      dropped = stats.except("statements", "admitted_asns").map { |k, v| "#{k}=#{v}" }.join(", ")
+      Env.log("wikidata P3797: #{stats['statements']} statements -> #{names.size} admissible named ASNs (dropped: #{dropped})")
+      [names, stats]
+    rescue JSON::ParserError, ArgumentError => e
+      Env.fail_stage!("wikidata P3797: unparseable response (#{e.message}) - did the endpoint return an error page?")
     end
 
     def parse_cidr_list(path, label)
