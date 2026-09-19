@@ -177,11 +177,11 @@ module OpenASNPipeline
 
     def paths
       {
-        sapics_v4: write("v4.csv", [
+        backbone_v4: write("v4.csv", [
           "#{v4('104.28.0.0')},#{v4('104.28.255.255')},13335,\"CLOUDFLARENET\"",
           "#{v4('146.70.107.0')},#{v4('146.70.107.255')},9009,\"M247\""
         ].join("\n") + "\n"),
-        sapics_v6: write("v6.csv", "#{IPAddr.new('2001:db8::').to_i},#{IPAddr.new('2001:db8::ffff').to_i},64496,\"X\"\n"),
+        backbone_v6: write("v6.csv", "#{IPAddr.new('2001:db8::').to_i},#{IPAddr.new('2001:db8::ffff').to_i},64496,\"X\"\n"),
         as_json: write("as.json", "[]"), # see without_as_metadata
         x4b_vpn: write("vpn.txt", "104.28.28.0/26\n104.28.28.64/29\n146.70.107.0/24\n194.5.52.0/23\n"),
         x4b_dc: write("dc.txt", "35.208.0.0/15\n146.70.107.0/24\n203.0.113.9/32\n"),

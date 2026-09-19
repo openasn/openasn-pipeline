@@ -25,7 +25,7 @@ The **nightly build workflow lives in the data repo** (`.github/workflows/nightl
 
 | stage | file | job |
 |---|---|---|
-| fetch | `pipeline/fetch.rb` | Tier A downloads: conditional GET, retries, keep-last-good |
+| fetch | `pipeline/fetch.rb` | Tier A downloads: conditional GET, retries, keep-last-good; the IP→ASN backbone is derived here from RouteViews RIB dumps by `tools/rib2origin` (Go) |
 | license gate | `pipeline/lib/license_gate.rb` | SHA-256 of every upstream license text vs pinned hashes; ANY drift fails the build |
 | normalize | `pipeline/normalize.rb` | parse everything into canonical rows; overlap sanitizer; strip the third-party feeds X4B merges into its overlays (`lib/x4b_first_party.rb`) |
 | crosscheck | `pipeline/crosscheck.rb` | ipverse category quality vs the X4B ∪ bad-asn reference set; drift alarms |
@@ -54,7 +54,7 @@ The compiler packs raw category, network-role, and OpenASN flag bits into the OA
 
 ```bash
 # next to a checkout of openasn/openasn:
-ruby pipeline/run.rb             # full build into build/dist/ (~100MB downloads, ~2 min)
+ruby pipeline/run.rb             # full build into build/dist/ (~950MB downloads, ~5 min)
 OFFLINE=1 ruby pipeline/run.rb   # rebuild from cache (fast dev iteration; gates that
                                  # need the network are skipped LOUDLY — never publish these)
 PUBLISH=1 ruby pipeline/run.rb   # + upload to the openasn/openasn rolling release
@@ -65,7 +65,11 @@ rake overrides:candidates        # curation aid: writes candidate lists to build
 rake licenses:check              # verify upstream license pins without building
 ```
 
-Requirements: Ruby ≥ 3.2, `jq` recommended (streams the ~69MB ipverse JSON; a stdlib fallback exists but is memory-hungry), `gh` CLI for publishing. The portable exports add two **build-only** toolchains — Python ≥ 3.9 for SQLite/CSV and Go for MMDB — described below.
+Requirements: Ruby ≥ 3.2, Go (version in `tools/rib2origin/go.mod`; stdlib only, compiled on first run), `jq` recommended (streams the ~69MB ipverse JSON; a stdlib fallback exists but is memory-hungry), `gh` CLI for publishing. The portable exports add two **build-only** toolchains — Python ≥ 3.9 for SQLite/CSV and Go for MMDB — described below.
+
+### The IP→ASN backbone
+
+Prefix → origin ASN is computed by this repo, not downloaded: `tools/rib2origin` reads one 2-hourly TABLE_DUMP_V2 RIB from each of ten RouteViews collectors (`Sources::ROUTEVIEWS_COLLECTORS`, ~850MB) and keeps an origin only when at least two distinct peer ASes see it (the rules are in the data repo's DECISIONS.md, D-SRC-2 (backbone)). Space that nobody announces stays `unknown`. `OPENASN_RV_RIB_SLOT=YYYYMMDD.HHMM` rebuilds a specific slot. The legacy sapics backbone is still selectable with `OPENASN_BACKBONE=sapics`, but its licence pin has been removed, so such a build fails the licence gate until it is deliberately re-pinned.
 
 ## Portable exports
 

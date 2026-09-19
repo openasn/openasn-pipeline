@@ -14,7 +14,7 @@
 # In GitHub Actions, a trip additionally opens an issue automatically
 # (see nightly-build.yml in the data repo, which runs this pipeline).
 #
-# SCOPES. `:tier_a` (Sources::LICENSE_URLS) is what the nightly checks: the
+# SCOPES. `:tier_a` (Sources.license_urls: LICENSE_URLS for the selected backbone) is what the nightly checks: the
 # inputs of the published artifact. `:curation` (Sources::CURATION_TERMS_URLS)
 # pins the terms of inputs read only as build-time curation evidence (RIR
 # delegated stats, D-SRC-1); the tools that read them check that scope, and it
@@ -42,7 +42,7 @@ module OpenASNPipeline
       raise ArgumentError, "unknown license scope #{unknown.inspect}" if unknown.any?
 
       out = {}
-      out.merge!(Sources::LICENSE_URLS.transform_values { _1.merge(scope: :tier_a) }) if scopes.include?(:tier_a)
+      out.merge!(Sources.license_urls.transform_values { _1.merge(scope: :tier_a) }) if scopes.include?(:tier_a)
       out.merge!(Sources::CURATION_TERMS_URLS.transform_values { _1.merge(scope: :curation) }) if scopes.include?(:curation)
       out
     end
@@ -142,6 +142,13 @@ module OpenASNPipeline
         Env.fail_stage!("#{source_id}: could not extract License section - README structure changed, INVESTIGATE") unless m
 
         "# License#{m[1]}"
+      when :wp_json_rendered_text
+        # RouteViews: WordPress REST rendering of the licence page. Tags are
+        # stripped and whitespace collapsed so only the words are pinned.
+        html = JSON.parse(body).dig("content", "rendered")
+        Env.fail_stage!("#{source_id}: licence JSON has no content.rendered - endpoint changed, INVESTIGATE") unless html.is_a?(String)
+
+        "#{html.gsub(/<[^>]+>/, ' ').gsub(/\s+/, ' ').strip}\n"
       when :conditions_of_use_section
         text = body.dup.force_encoding("UTF-8").scrub
         m = text.match(/^(2\.[ \t]+CONDITIONS OF USE[ \t]*\r?\n.*?)^3\.[ \t]+STATISTICS FORMAT/m)
