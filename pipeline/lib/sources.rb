@@ -15,6 +15,7 @@
 require_relative "env"
 require_relative "http"
 require_relative "wikidata_names"
+require_relative "wikidata_countries"
 
 module OpenASNPipeline
   module Sources
@@ -93,13 +94,15 @@ module OpenASNPipeline
     ROUTEVIEWS_LICENSE = { url: ROUTEVIEWS_LICENSE_URL, extract: :wp_json_rendered_text }.freeze
     ROUTEVIEWS_CATALOG = { id: "routeviews", url: "https://www.routeviews.org/", license: "CC-BY-4.0" }.freeze
 
-    # --- ipverse/as-metadata: ASN -> country/category/role --------------------
+    # --- ipverse/as-metadata: ASN -> category/role ------------------------------
     # CC0 1.0 (LICENSE pinned below). Its `description` field is NOT
     # published (data-repo DECISIONS.md D-SRC-2, org names). The field is bulk
     # RIR WHOIS `descr`, which APNIC, ARIN and RIPE forbid republishing in bulk,
     # and ipverse's CC0 cannot license data it does not own. Clients that want
     # those names fetch ipverse's as.csv themselves via the `ipverse_org_names`
-    # Tier B recipe in the data repo's fetch-manifest.json.
+    # Tier B recipe in the data repo's fetch-manifest.json. Its `countryCode` is
+    # not published either (D-SRC-2, country): ipverse sources it "from
+    # regional internet registries (RIR)". Recipe `ipverse_as_country`.
     #
     # The `category`/`networkRole` fields
     # exist ONLY in as.json (~69MB), NOT in as.csv (verified 2026-07-04:
@@ -159,6 +162,10 @@ module OpenASNPipeline
     # WHOIS data, or aggregators of it, is dropped. One SPARQL GET per build,
     # cached with keep-last-good like every other input.
     WIKIDATA_P3797_URL = WikidataNames.url
+    # Same licence, second GET: P17 "country" / P159 "headquarters location"
+    # of those items, the CC0 half of the published `country` column
+    # (lib/wikidata_countries.rb; data-repo DECISIONS.md D-SRC-2, country).
+    WIKIDATA_COUNTRIES_URL = WikidataCountries.url
 
     # --- brianhama/bad-asn-list: curated hosting/cloud/colo ASNs --------------
     # MIT, first-party curation (~700+ ASNs). Also the market thesis: its

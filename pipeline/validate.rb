@@ -22,6 +22,10 @@
 #       a reason (routing changes happen - e.g. an IP moving providers).
 #   G6. Org-names sidecar: sentinel ASNs resolve, and its entry count is
 #       drift-gated (LAYER_POLICY) against the previous build and weekly pins.
+#   G8. Per-ASN country (asn-categories.csv): sentinel ASNs carry their
+#       curated country, and the count of non-empty countries is drift-gated
+#       (LAYER_POLICY) like G6. D-SRC-2 (country). (Numbered after G7, the
+#       candidate gate, which kept its name from the exports work.)
 #   G7. The ASSEMBLED CANDIDATE is complete and internally consistent: every
 #       registered asset is still the bytes it was registered as, the
 #       manifest and SHA256SUMS describe exactly the registry (and never
@@ -68,6 +72,7 @@ module OpenASNPipeline
       check_deltas!(artifacts, previous_stats, baseline_stats)
       run_spotchecks!(artifacts)
       check_orgs!(compiled, previous_stats, baseline_stats)
+      check_countries!(compiled, previous_stats, baseline_stats)
 
       Env.log("validate: all gates green")
       artifacts
@@ -171,6 +176,31 @@ module OpenASNPipeline
         now: File.binread(path, 16)[8, 4].unpack1("N"),
         prev: previous_stats && previous_stats["org_names"],
         baselines: DriftGate.baselines_from(pins) { |s| s["org_names"] },
+        policy: LAYER_POLICY
+      )
+    end
+
+    # G8: since D-SRC-2 (country) the `country` column is CC0-only
+    # (asn_country.txt, then Wikidata). The sentinels come from the
+    # hand-curated head of asn_country.txt, so a miss means that file failed
+    # to load or lost its head, not an upstream blip. The count is drift-gated
+    # like the org names; a metric absent from the previous manifest SKIPs.
+    COUNTRY_SENTINELS = { 15_169 => "US", 13_335 => "US", 3352 => "ES" }.freeze
+
+    def check_countries!(compiled, previous_stats = nil, baseline_stats = [])
+      countries = compiled[:countries] || {}
+      COUNTRY_SENTINELS.each do |asn, cc|
+        got = countries.dig(asn, "cc")
+        Env.fail_stage!("G8: country for AS#{asn} is #{got.inspect}, expected #{cc.inspect}") unless got == cc
+      end
+
+      pins = baseline_stats.select { |p| p.stats["countries"] }
+      DriftGate.enforce!(
+        gate: "G8",
+        metric: "countries",
+        now: countries.size,
+        prev: previous_stats && previous_stats["countries"],
+        baselines: DriftGate.baselines_from(pins) { |s| s["countries"] },
         policy: LAYER_POLICY
       )
     end

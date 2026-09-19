@@ -28,6 +28,11 @@ task "org_names:draft", [:paths] do |_t, args|
   ruby "pipeline/tools/org_names_from_dossiers.rb", *args[:paths].to_s.split(/[\s,]+/)
 end
 
+desc "Draft data/overrides/asn_country.txt lines from enrichment dossiers: rake 'asn_country:draft[a.jsonl b.jsonl]'"
+task "asn_country:draft", [:paths] do |_t, args|
+  ruby "pipeline/tools/asn_country_from_dossiers.rb", *args[:paths].to_s.split(/[\s,]+/)
+end
+
 desc "Verify upstream licenses against pinned hashes without building. SCOPE=tier_a|curation|all (default all; the nightly checks tier_a only)"
 task "licenses:check" do
   require_relative "pipeline/lib/http"
