@@ -34,6 +34,48 @@ module OpenASNPipeline
       "origin-asn-ipv6-num.csv" => "https://github.com/sapics/ip-location-db/releases/download/latest/origin-asn-ipv6-num.csv"
     }.freeze
 
+    # --- RouteViews (University of Oregon): raw BGP RIBs -> our own backbone --
+    # PROTOTYPE behind OPENASN_BACKBONE=routeviews (data-repo coordinator
+    # decision CD-5, 2026-09-19; proposal D-SRC-2). Default stays sapics
+    # until the replacement is proven equivalent and the owner merges.
+    #
+    # Why: sapics origin-asn is itself compiled from RouteViews + RIPE RIS
+    # (+ RIR stats for unrouted space) and relabelled PDDL, so it fails the
+    # "aggregators never qualify" invariant (P4-L audit). Deriving
+    # prefix->origin ourselves from RouteViews only removes the aggregator
+    # and the RIPE RIS dependency (EU database right, revocable permission).
+    #
+    # Terms (verified 2026-09-19, docs/enrichment/research/parts/
+    # P4-B-routeviews-terms-2026-09-19.jsonl): "RouteViews Data" is CC BY 4.0
+    # with attribution-type requests (credit + link, logo, boilerplate) and a
+    # revocation clause conditioned on missing attribution or "abuse". The
+    # published table holds only prefix->origin facts recomputed by our code
+    # (tools/rib2origin); ATTRIBUTION.md credits RouteViews in their
+    # prescribed words regardless.
+    #
+    # GOTCHAS: archive.routeviews.org's robots.txt is "Disallow: /" - we fetch
+    # a fixed list of named files once per build and never crawl directory
+    # listings. RIBs are written every 2h (00,02,...,22 UTC) and appear some
+    # minutes after the slot; route-views2 lives at the archive ROOT
+    # (/bgpdata/...), every other collector under /<collector>/bgpdata/...
+    ROUTEVIEWS_ARCHIVE = "https://archive.routeviews.org"
+    # Picked for geography (US west/east, UK, DE, ZA, SG, AU, BR, JP) plus the
+    # v6-focused route-views6. Measured on the 2026-09-18 20:00 slot: these 10
+    # = 186 distinct peer ASes, 852 MB; adding 6 more (rv3/4/5, amsix,
+    # chicago, isc) = 256 peer ASes, 1.33 GB, but v4 coverage moved only
+    # +0.02 pt and origin agreement +0.02 pt, so they stay out.
+    ROUTEVIEWS_COLLECTORS = %w[
+      route-views2 route-views.eqix route-views.linx decix.fra route-views.napafrica
+      route-views.sg route-views.sydney ix-br.gru route-views.wide route-views6
+    ].freeze
+    # The WordPress JSON rendering of the licence page: same text as
+    # https://www.routeviews.org/routeviews/licenses/ without the theme's
+    # markup, so theme churn cannot trip the gate (verified: identical bytes
+    # on repeated fetches, 2026-09-19). Text is tag-stripped before hashing.
+    ROUTEVIEWS_LICENSE_URL = "https://www.routeviews.org/routeviews/wp-json/wp/v2/pages/45927?_fields=content"
+
+    BACKBONES = %w[sapics routeviews].freeze
+
     # --- ipverse/as-metadata: ASN -> description/country/category/role -------
     # CC0 1.0 (LICENSE pinned below). The `category`/`networkRole` fields
     # exist ONLY in as.json (~69MB), NOT in as.csv (verified 2026-07-04:
@@ -121,6 +163,51 @@ module OpenASNPipeline
     ].freeze
 
     module_function
+
+    # Which IP->ASN backbone this build compiles from. sapics is the default
+    # until D-SRC-2 is decided; anything unknown fails loudly.
+    def backbone
+      b = ENV.fetch("OPENASN_BACKBONE", "sapics")
+      Env.fail_stage!("OPENASN_BACKBONE=#{b.inspect} - expected one of #{BACKBONES.join(', ')}") unless BACKBONES.include?(b)
+      b
+    end
+
+    def routeviews? = backbone == "routeviews"
+
+    # Licence-gate targets for THIS build: the backbone we do not compile
+    # from is not pinned (its terms no longer reach the artifact).
+    def license_urls
+      return LICENSE_URLS unless routeviews?
+
+      LICENSE_URLS.reject { |id, _| id == "sapics-origin-asn" }
+                  .merge("routeviews" => { url: ROUTEVIEWS_LICENSE_URL, extract: :wp_json_rendered_text })
+    end
+
+    # manifest.json `sources` for THIS build.
+    def catalog
+      return CATALOG unless routeviews?
+
+      CATALOG.reject { |s| s[:id] == "sapics-origin-asn" } +
+        [{ id: "routeviews", url: "https://www.routeviews.org/", license: "CC-BY-4.0" }]
+    end
+
+    # RouteViews RIB URL for one collector and a slot "YYYYMMDD.HHMM" (UTC).
+    def routeviews_rib_url(collector, slot)
+      month = "#{slot[0, 4]}.#{slot[4, 2]}"
+      base = collector == "route-views2" ? ROUTEVIEWS_ARCHIVE : "#{ROUTEVIEWS_ARCHIVE}/#{collector}"
+      "#{base}/bgpdata/#{month}/RIBS/rib.#{slot}.bz2"
+    end
+
+    # The newest 2-hourly RIB slot that is safely complete: at least `lag`
+    # seconds old (dumps of big collectors take a while to land). Override
+    # with OPENASN_RV_RIB_SLOT=YYYYMMDD.HHMM to rebuild a specific day.
+    def routeviews_slot(now = Time.now.utc, lag: 3 * 3600)
+      return ENV["OPENASN_RV_RIB_SLOT"] if ENV["OPENASN_RV_RIB_SLOT"].to_s.match?(/\A\d{8}\.\d{4}\z/)
+
+      t = now - lag
+      t = Time.utc(t.year, t.month, t.day, t.hour - (t.hour % 2))
+      t.strftime("%Y%m%d.%H%M")
+    end
 
     # Resolve the actual origin-asn download URLs from sapics' README table.
     # Returns { filename => url }. Falls back to SAPICS_FALLBACK with a

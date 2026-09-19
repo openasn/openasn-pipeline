@@ -12,6 +12,7 @@
 require_relative "lib/env"
 require_relative "lib/http"
 require_relative "lib/sources"
+require_relative "lib/routeviews"
 
 module OpenASNPipeline
   module Fetch
@@ -35,10 +36,19 @@ module OpenASNPipeline
       Env.prepare_dirs!
       paths = {}
 
-      sapics = Sources.resolve_sapics_urls(http) unless offline
-      sapics ||= Sources::SAPICS_FALLBACK
-      paths[:sapics_v4] = http.fetch(sapics["origin-asn-ipv4-num.csv"], KEYS[:sapics_v4], offline: offline)
-      paths[:sapics_v6] = http.fetch(sapics["origin-asn-ipv6-num.csv"], KEYS[:sapics_v6], offline: offline)
+      # The IP->ASN backbone: sapics (default) or, behind
+      # OPENASN_BACKBONE=routeviews, our own derivation from RouteViews RIBs
+      # (lib/routeviews.rb). Either way normalize.rb reads :backbone_v4/_v6.
+      if Sources.routeviews?
+        paths.merge!(RouteViews.build(http: http, offline: offline))
+      else
+        sapics = Sources.resolve_sapics_urls(http) unless offline
+        sapics ||= Sources::SAPICS_FALLBACK
+        paths[:sapics_v4] = http.fetch(sapics["origin-asn-ipv4-num.csv"], KEYS[:sapics_v4], offline: offline)
+        paths[:sapics_v6] = http.fetch(sapics["origin-asn-ipv6-num.csv"], KEYS[:sapics_v6], offline: offline)
+        paths[:backbone_v4] = paths[:sapics_v4]
+        paths[:backbone_v6] = paths[:sapics_v6]
+      end
 
       paths[:as_json] = http.fetch(Sources::IPVERSE_AS_JSON_URL, KEYS[:as_json], offline: offline)
 
@@ -52,7 +62,7 @@ module OpenASNPipeline
       # Cheap sanity floor: catch an upstream serving an error page / empty
       # body with HTTP 200 before we waste a build on it. Real validation
       # gates run later (validate.rb); this is just "is it plausibly data".
-      min_bytes = { sapics_v4: 5_000_000, sapics_v6: 1_000_000, as_json: 10_000_000,
+      min_bytes = { backbone_v4: 5_000_000, backbone_v6: 1_000_000, as_json: 10_000_000,
                     x4b_vpn: 50_000, x4b_dc: 200_000, x4b_vpn_asn: 100,
                     x4b_dc_asn: 5_000, bad_asn: 5_000 }
       min_bytes.each do |key, floor|

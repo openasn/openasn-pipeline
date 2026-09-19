@@ -35,7 +35,7 @@ module OpenASNPipeline
       pins = load_pins
       failures = []
 
-      Sources::LICENSE_URLS.each do |source_id, spec|
+      Sources.license_urls.each do |source_id, spec|
         live_text = extract(http.get!(spec[:url]), spec[:extract], source_id)
         live_sha  = Digest::SHA256.hexdigest(live_text)
         pinned    = pins.dig(source_id, "sha256")
@@ -63,7 +63,7 @@ module OpenASNPipeline
     def pin!(http: Http.new)
       FileUtils.mkdir_p(Env.licenses_dir)
       pins = {}
-      Sources::LICENSE_URLS.each do |source_id, spec|
+      Sources.license_urls.each do |source_id, spec|
         text = extract(http.get!(spec[:url]), spec[:extract], source_id)
         pins[source_id] = {
           "url" => spec[:url],
@@ -98,6 +98,13 @@ module OpenASNPipeline
         Env.fail_stage!("#{source_id}: could not extract License section - README structure changed, INVESTIGATE") unless m
 
         "# License#{m[1]}"
+      when :wp_json_rendered_text
+        # RouteViews: WordPress REST rendering of the licence page. Tags are
+        # stripped and whitespace collapsed so only the words are pinned.
+        html = JSON.parse(body).dig("content", "rendered")
+        Env.fail_stage!("#{source_id}: licence JSON has no content.rendered - endpoint changed, INVESTIGATE") unless html.is_a?(String)
+
+        "#{html.gsub(/<[^>]+>/, ' ').gsub(/\s+/, ' ').strip}\n"
       else
         Env.fail_stage!("unknown license extract mode #{mode.inspect} for #{source_id}")
       end

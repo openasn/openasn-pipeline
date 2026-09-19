@@ -28,6 +28,7 @@ require_relative "lib/env"
 require_relative "lib/asjson"
 require_relative "lib/binary"
 require_relative "lib/sources"
+require_relative "lib/routeviews"
 require_relative "lib/license_gate"
 require_relative "lib/drift_gate"
 require_relative "fetch"
@@ -99,7 +100,7 @@ module OpenASNPipeline
         }
       end
 
-      sources = Sources::CATALOG.map do |src|
+      sources = Sources.catalog.map do |src|
         {
           id: src[:id], url: src[:url], license: src[:license],
           license_sha256: pins.dig(src[:id], "sha256"),
@@ -139,7 +140,7 @@ module OpenASNPipeline
           dc_ipv4: artifacts[:ipv4].counts[:dc],
           base_ipv6: artifacts[:ipv6].counts[:base]
         }
-      }.merge(crosscheck_stats || {}).merge(DriftGate.manifest_stamp)
+      }.merge(crosscheck_stats || {}).merge(DriftGate.manifest_stamp).merge(RouteViews.manifest_stamp)
     end
 
     def records_for(name, artifacts, path)
@@ -178,6 +179,9 @@ module OpenASNPipeline
       case source_id
       when "openasn-overrides" then build_id
       when "ipverse-as-ip-blocks" then nil
+      # RouteViews: the oldest RIB this build compiled from.
+      when "routeviews"
+        Sources::ROUTEVIEWS_COLLECTORS.filter_map { |c| http.fetched_at(RouteViews.cache_key(c)) }.min
       else
         keys = SOURCE_FETCH_KEYS.fetch(source_id) { return nil }
         keys.filter_map { |k| http.fetched_at(Fetch::KEYS[k]) }.min
