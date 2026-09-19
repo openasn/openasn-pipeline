@@ -8,7 +8,17 @@ module OpenASNPipeline
     # RIR delegated-extended statistics — the authoritative bulk source for an ASN's
     # allocation date, owning RIR, registered country and status, plus an opaque
     # per-org hash that groups the ASNs one org holds (free sibling detection).
-    # Published openly by each of the 5 RIRs; the fields we keep are facts, CC0-safe.
+    #
+    # LICENCE (corrected 2026-09-19): these files are NOT established as CC0-safe.
+    # APNIC/AFRINIC/LACNIC grant "download and use" only, ARIN is silent, RIPE NCC
+    # reserves all rights (see lib/rir_stats.rb and data-repo DECISIONS.md D-SRC-1).
+    # quant.jsonl is owner-private research input; do not publish RIR-derived
+    # fields from it (and never RIPE-derived ones) until D-SRC-1 is ruled on.
+    #
+    # WARNING for sibling use: org_hash here is the raw per-RIR opaque-id. APNIC
+    # gives a whole NIR pool one id (IRINN: 5,385 ASNs), so an org_hash group is
+    # not necessarily one organisation. lib/rir_stats.rb keys holders by RIR and
+    # marks pools; prefer it for anything sibling-shaped.
     #
     # Line format: rir|cc|type|start|count|date|status|opaque-id   (type == "asn")
     #

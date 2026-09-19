@@ -1,13 +1,24 @@
 name: Tests
 
-# Unit tests only — pure logic, no network, no data-repo checkout needed
+# Unit tests only - pure logic, no network, no data-repo checkout needed
 # (that's by design: lib paths resolve lazily). The nightly DATA build
 # lives in openasn/openasn's nightly-build.yml, which checks this repo out.
+#
+# KEEP THE `test` JOB DEPENDENCY-FREE. It installs Ruby and nothing else, so a
+# contributor editing a classifier gets an answer without waiting on a Go
+# compiler or a Python interpreter. Everything that needs a build-only
+# toolchain lives in exports.yml beside this file: the Python SQLite suite,
+# the Go MMDB tool, the synthetic end-to-end, and the reproducibility
+# comparison (PRD 17.1). Add jobs there, not here.
 
 on:
   pull_request:
   push:
     branches: [main]
+
+# Narrower than the repository default: this workflow only reads code.
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -23,8 +34,15 @@ jobs:
       - name: Run unit tests
         run: bundle exec rake test
 
-      # tools/rib2origin (the RouteViews backbone deriver) is Go, stdlib
-      # only; the Ruby tests above cover the wiring, these the derivation.
+
+  # tools/rib2origin (the RouteViews backbone deriver, a nightly build input)
+  # is Go, stdlib only. Its own job, so the Ruby job above stays
+  # dependency-free; the Ruby tests cover the wiring, these the derivation.
+  rib2origin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/setup-go@v7
         with:
           go-version-file: tools/rib2origin/go.mod

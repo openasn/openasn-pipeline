@@ -113,6 +113,14 @@ module OpenASNPipeline
     # (source files and generated output)" - the wording that makes X4B
     # redistributable when most aggregated lists are not (quote pinned in data/licenses/).
     #
+    # BUT the generated output also merges third-party feeds X4B does not own
+    # (Apple Private Relay, Mullvad, PIA, Proton - all Tier B for us). The
+    # published output/ files are therefore only an UPPER BOUND: normalize.rb
+    # keeps vpn ranges only where X4B's first-party inputs (ASN.txt expanded
+    # against our backbone, plus ips/Manual.txt) justify them, and strips the
+    # named third-party file from the datacenter list. Rationale and
+    # measurements: lib/x4b_first_party.rb, data-repo DECISIONS.md D-SRC-3.
+    #
     # GOTCHA: the legacy root ipv4.txt path was REMOVED in 2026 (it broke
     # MISP's generator which still hardcodes it). Only output/... paths are
     # stable. IPv4 only - X4B publishes no IPv6; v6 VPN signal comes from
@@ -120,9 +128,22 @@ module OpenASNPipeline
     X4B_VPN_URL = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt"
     X4B_DC_URL  = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt"
     # Hand-curated ASN input files (first-party curation, MIT) - seeds for
-    # data/overrides/ and the crosscheck reference set.
+    # data/overrides/, the crosscheck reference set, and the first-party
+    # restriction of the overlays above.
     X4B_VPN_ASN_URL = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/vpn/ASN.txt"
     X4B_DC_ASN_URL  = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/datacenter/ASN.txt"
+    # Hand-curated netblocks (first-party, MIT; "Comment description
+    # manditory" per the file header). The ONLY files under input/*/ips/ that
+    # are first-party - every sibling there is a third-party feed.
+    X4B_VPN_MANUAL_URL = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/vpn/ips/Manual.txt"
+    X4B_DC_MANUAL_URL  = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/datacenter/ips/Manual.txt"
+    # Third-party feed files X4B merges into output/datacenter/ipv4.txt. Read
+    # ONLY to subtract them (D-CUR-1 consultation; never republished). No X4B
+    # workflow writes to input/datacenter/ips/ today - if one ever does, add
+    # its file here (lib/x4b_first_party.rb explains why dc is a blacklist).
+    X4B_DC_FEEDS = {
+      "input/datacenter/ips/protonvpn.txt" => "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/datacenter/ips/protonvpn.txt"
+    }.freeze
 
     # --- brianhama/bad-asn-list: curated hosting/cloud/colo ASNs --------------
     # MIT, first-party curation (~700+ ASNs). Also the market thesis: its
@@ -169,6 +190,40 @@ module OpenASNPipeline
     SAPICS_LICENSE = {
       url: "https://raw.githubusercontent.com/sapics/ip-location-db/main/origin-asn/SOURCES.md",
       extract: :whole_file
+    }.freeze
+
+    # --- Curation-scope terms (NOT Tier A) ---------------------------------------
+    # Terms governing inputs that are read at build time as curation evidence
+    # (D-CUR-1) but never compiled into a published artifact. Pinned in the same
+    # pins.json (entries carry "scope": "curation") so a change in the terms is
+    # noticed, but checked only by the tools that read those inputs - they must
+    # never block the nightly publish, which does not contain them.
+    #
+    # RIR delegated-extended stats (lib/rir_stats.rb, DECISIONS.md D-SRC-1):
+    #   * APNIC / AFRINIC declare "CONDITIONS OF USE" as section 2 of their
+    #     README-EXTENDED; the file is regenerated daily, so we pin just that
+    #     section (extract: conditions_of_use_section).
+    #   * LACNIC's equivalent is a standalone disclaimer.txt (ISO-8859-1, 2007).
+    #   * ARIN publishes no terms for the stats files. We pin its README as an
+    #     ABSENCE RECEIPT: if ARIN ever adds conditions there, the gate trips.
+    #   * RIPE NCC is excluded (restrictive site-wide terms), so nothing is pinned.
+    CURATION_TERMS_URLS = {
+      "apnic-delegated-stats" => {
+        url: "https://ftp.apnic.net/stats/apnic/README-EXTENDED.TXT",
+        extract: :conditions_of_use_section
+      },
+      "afrinic-delegated-stats" => {
+        url: "https://ftp.afrinic.net/pub/stats/afrinic/README-EXTENDED.txt",
+        extract: :conditions_of_use_section
+      },
+      "lacnic-delegated-stats" => {
+        url: "https://ftp.lacnic.net/pub/stats/lacnic/disclaimer.txt",
+        extract: :whole_file
+      },
+      "arin-delegated-stats" => {
+        url: "https://ftp.arin.net/pub/stats/arin/README",
+        extract: :whole_file
+      }
     }.freeze
 
     # Metadata that ends up in manifest.json's `sources` array so every

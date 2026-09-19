@@ -86,6 +86,45 @@ module OpenASNPipeline
       gaps
     end
 
+    # Intersection of two sorted, disjoint [start, end] arrays (the shape
+    # merge_ranges returns). Output is sorted and disjoint; ranges that only
+    # touch are NOT merged here - run merge_ranges if adjacency matters.
+    def intersect_ranges(a, b)
+      out = []
+      i = j = 0
+      while i < a.length && j < b.length
+        s = a[i][0] > b[j][0] ? a[i][0] : b[j][0]
+        e = a[i][1] < b[j][1] ? a[i][1] : b[j][1]
+        out << [s, e] if s <= e
+        if a[i][1] < b[j][1] then i += 1 else j += 1 end
+      end
+      out
+    end
+
+    # a − b for sorted, disjoint [start, end] arrays (the many-range sibling
+    # of subtract_covered). Output is sorted and disjoint.
+    def subtract_ranges(a, b)
+      out = []
+      j = 0
+      a.each do |(s, e)|
+        cur = s
+        j += 1 while j < b.length && b[j][1] < cur
+        k = j
+        while k < b.length && b[k][0] <= e
+          out << [cur, b[k][0] - 1] if b[k][0] > cur
+          cur = b[k][1] + 1 if b[k][1] + 1 > cur
+          k += 1
+        end
+        out << [cur, e] if cur <= e
+      end
+      out
+    end
+
+    # Number of addresses covered by disjoint [start, end] ranges.
+    def address_count(ranges)
+      ranges.sum { |(s, e)| e - s + 1 }
+    end
+
     # Binary search over a sorted, disjoint array of [start, end, ...] rows.
     # Returns the matching row or nil. Used by validation (the shipped gem has
     # its own reader over the packed artifact; this one is for in-memory rows).
