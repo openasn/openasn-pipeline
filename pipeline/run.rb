@@ -56,10 +56,25 @@ module OpenASNPipeline
         Env.warn("#{DriftGate::ACK_ENV} is set (#{ENV[DriftGate::ACK_ENV].strip.inspect}): a drift FAIL this run " \
                  "becomes a WARN and the reason is stamped into manifest.json")
       end
+      reanchor = DriftGate.reanchor_metrics
+      if reanchor.any?
+        if DriftGate.normalize_ack(ENV[DriftGate::ACK_ENV])
+          Env.warn("#{DriftGate::REANCHOR_ENV} is set (#{reanchor.to_a.join(', ')}): an ACKED fail on those metrics " \
+                   "becomes their reviewed baseline (D-GATE-1 rule 8)")
+        else
+          Env.warn("#{DriftGate::REANCHOR_ENV} is set but #{DriftGate::ACK_ENV} is not - ignored: only an ack " \
+                   "with a reason can record a reviewed baseline")
+        end
+      end
       crosscheck_stats = Crosscheck.run(normalized, previous_stats: previous, baseline_stats: baselines)
 
       compiled  = Compile.run(normalized, http: http, offline: offline)
       artifacts = Validate.run(compiled, previous_stats: previous, baseline_stats: baselines)
+      unused = reanchor.to_a - DriftGate.reanchored
+      if unused.any? && DriftGate.normalize_ack(ENV[DriftGate::ACK_ENV])
+        Env.warn("#{DriftGate::REANCHOR_ENV}: #{unused.join(', ')} did not fail and get acked this run - no " \
+                 "reviewed baseline recorded for it (a typo, or nothing to re-anchor)")
+      end
 
       Publish.run(compiled, normalized, crosscheck_stats, artifacts, http: http)
 

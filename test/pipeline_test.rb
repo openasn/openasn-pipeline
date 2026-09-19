@@ -828,10 +828,12 @@ module OpenASNPipeline
 
     def ack_night
       ENV[DriftGate::ACK_ENV] = ACK
+      ENV[DriftGate::REANCHOR_ENV] = "vpn_ipv4" # the D-SRC-3 dispatch names its metric
       Validate.check_deltas!(artifacts(vpn: 4_692), { "layer_counts" => LATEST }, old_pins)
       published_stats(LATEST.merge("vpn_ipv4" => 4_692, "dc_ipv4" => 30_105))
     ensure
       ENV.delete(DriftGate::ACK_ENV)
+      ENV.delete(DriftGate::REANCHOR_ENV)
     end
 
     def next_night(prev_stats, vpn: 4_700, dc: 30_110, pins: old_pins)
@@ -934,6 +936,82 @@ module OpenASNPipeline
       assert_equal r, res.reviewed
       assert_empty DriftGate.reviewed_from(nil)
       assert_empty DriftGate.reviewed_from({ "reviewed_baselines" => { "vpn_ipv4" => { "value" => 0 } } })
+    end
+
+    # --- RX adversarial review, 2026-09-19 -------------------------------
+
+    # A run stops at the FIRST failing gate, so the operator acks having seen
+    # only the vpn failure. A real dc cliff behind it is acked by the same env
+    # var. It must NOT be re-anchored: that would silence it for good.
+    def test_an_unseen_second_failure_is_acked_for_one_run_but_never_reanchored
+      ENV[DriftGate::ACK_ENV] = ACK
+      ENV[DriftGate::REANCHOR_ENV] = "vpn_ipv4"
+      Validate.check_deltas!(artifacts(vpn: 4_692, dc: 22_000), { "layer_counts" => LATEST }, old_pins)
+      assert_equal %w[dc_ipv4 vpn_ipv4], DriftGate.events.map(&:metric).sort, "both failures were acked this run"
+      assert_equal ["vpn_ipv4"], DriftGate.reanchored
+      stats = published_stats(LATEST.merge("vpn_ipv4" => 4_692, "dc_ipv4" => 22_000))
+      assert_equal ["vpn_ipv4"], stats["reviewed_baselines"].keys
+      ENV.delete(DriftGate::ACK_ENV)
+      ENV.delete(DriftGate::REANCHOR_ENV)
+
+      next_night(stats, vpn: 4_700, dc: 22_010)
+      refute DriftGate.clean?, "the dc cliff must stay visible"
+      assert_match(/drift WARN\(SLIDE\) dc_ipv4: 22000 -> 22010 .*best weekly pin v2026\.09\.13 \(30068\)/, log)
+      refute_match(/SLIDE\) vpn_ipv4/, log)
+    ensure
+      ENV.delete(DriftGate::ACK_ENV)
+      ENV.delete(DriftGate::REANCHOR_ENV)
+    end
+
+    # A bare ack keeps D-GATE-1 rule 4's meaning: this run only. An operator
+    # who acks a TRANSIENT upstream drop as real must not lose the recovery
+    # rule: when upstream snaps back, the old pin still rescues it. (With the
+    # ack re-anchoring implicitly, this FAILED every night: the D-GATE-1
+    # deadlock, 10,200 -> 12,400 "not within 5% of v2026.08.23=12393".)
+    def test_a_bare_ack_records_no_reviewed_baseline_so_recovery_still_self_heals
+      hp = [Crosscheck::Pin.new(label: "v2026.08.23", build_id: "2026-08-23T03:59:55Z", stats: { "hosting_asns" => 12_393 })]
+      pins = DriftGate.baselines_from(hp) { |s| s["hosting_asns"] }
+      r = DriftGate.enforce!(metric: "hosting_asns", now: 10_200, prev: 12_393, baselines: pins,
+                             policy: DriftGate::HOSTING_POLICY, ack: "looks real to me", reanchor: nil)
+      assert_equal :acked, r.status
+      stats = JSON.parse(JSON.generate({ "hosting_asns" => 10_200 }.merge(DriftGate.manifest_stamp)))
+      assert_nil stats["reviewed_baselines"], "no metric named: nothing re-anchored"
+      assert_match(/overridden for this run only .*OPENASN_ACK_DRIFT_REANCHOR=hosting_asns/, log)
+
+      DriftGate.reset!
+      r = DriftGate.enforce!(metric: "hosting_asns", now: 12_400, prev: 10_200, baselines: pins,
+                             policy: DriftGate::HOSTING_POLICY, ack: nil,
+                             reviewed: DriftGate.reviewed_from(stats)["hosting_asns"])
+      assert_equal :recovery, r.status
+    end
+
+    def test_reanchor_without_an_ack_or_for_a_passing_metric_records_nothing
+      ENV[DriftGate::REANCHOR_ENV] = "vpn_ipv4, dc_ipv4"
+      assert_raises(StageFailure) { Validate.check_deltas!(artifacts(vpn: 4_692), { "layer_counts" => LATEST }, old_pins) }
+      assert_empty DriftGate.reviewed_state, "no ack, no review"
+      DriftGate.reset!
+      ENV[DriftGate::ACK_ENV] = ACK
+      Validate.check_deltas!(artifacts(vpn: 4_692), { "layer_counts" => LATEST }, old_pins)
+      assert_equal ["vpn_ipv4"], DriftGate.reviewed_state.keys, "dc passed: naming it re-anchors nothing"
+    ensure
+      ENV.delete(DriftGate::ACK_ENV)
+      ENV.delete(DriftGate::REANCHOR_ENV)
+    end
+
+    # The FAIL message must name what the gate consulted, not the raw pins.
+    def test_fail_message_names_the_reviewed_baseline_not_the_ignored_pins
+      stats = ack_night
+      err = assert_raises(StageFailure) { next_night(stats, vpn: 6_600) }
+      assert_match(/drift FAIL vpn_ipv4: 4692 -> 6600/, err.message)
+      assert_match(/\(reviewed baseline 2026-09-19 \(ack: D-SRC-3[^)]*\)=4692; weekly pins older than the reviewed baseline are ignored/, err.message)
+      refute_match(/v2026\.09\.13=6593/, err.message)
+    end
+
+    def test_malformed_reviewed_stamps_degrade_to_no_review
+      assert_empty DriftGate.reviewed_from({ "reviewed_baselines" => "vpn_ipv4" })
+      assert_empty DriftGate.reviewed_from({ "reviewed_baselines" => [["vpn_ipv4", { "value" => 5 }]] })
+      assert_empty DriftGate.reviewed_from({ "reviewed_baselines" => { "vpn_ipv4" => 4_692 } })
+      assert_empty DriftGate.reviewed_from("not a hash")
     end
   end
 

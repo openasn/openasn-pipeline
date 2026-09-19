@@ -112,6 +112,8 @@ module OpenASNPipeline
       out.puts "  reference coverage floor: #{(Crosscheck::MIN_REFERENCE_COVERAGE * 100).to_i}%"
       ack = DriftGate.normalize_ack(ENV[DriftGate::ACK_ENV])
       out.puts "  #{DriftGate::ACK_ENV}: #{ack ? "SET — #{ack.inspect}" : 'not set (normal)'}"
+      reanchor = DriftGate.reanchor_metrics
+      out.puts "  #{DriftGate::REANCHOR_ENV}: #{reanchor.any? ? "SET — #{reanchor.to_a.join(', ')}" : 'not set (normal)'}"
     end
 
     # The two questions an operator actually has:

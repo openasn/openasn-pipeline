@@ -76,16 +76,30 @@
 #   the slide check WARNs forever, a warned build is never clean, and no
 #   weekly pin is ever cut again - for any metric. The pins would only age.
 #
-#   So an acked evaluation records a REVIEWED BASELINE for exactly the acked
-#   metric: {value, reason, reviewed_at}, stamped into manifest.json
-#   (stats.reviewed_baselines) and carried forward build to build. While it
-#   is newer than every weekly pin for that metric, it REPLACES those older
-#   pins for that metric: recovery, the slow-slide anchor, and the
-#   no-previous-build fallback all use it. The first clean pin cut after it
-#   supersedes it and it stops being carried. Other metrics are untouched.
+#   So an acked evaluation of a metric the operator NAMED in
+#   OPENASN_ACK_DRIFT_REANCHOR (nightly-build.yml input `ack_drift_reanchor`)
+#   records a REVIEWED BASELINE for that metric: {value, reason, reviewed_at},
+#   stamped into manifest.json (stats.reviewed_baselines) and carried forward
+#   build to build. Pins cut before it are ignored for that metric; while no
+#   newer pin exists it stands in for them: recovery, the slow-slide anchor,
+#   and the no-previous-build fallback all use it. Clean pins cut after it
+#   take over as they appear, and it stops being carried once no consulted
+#   pin predates it. Other metrics are untouched.
+#
+#   WHY THE METRIC MUST BE NAMED (adversarial review RX, 2026-09-19). The ack
+#   env var covers EVERY metric that fails in the run, and a run stops at the
+#   FIRST failing gate, so the operator only ever sees one failure before
+#   acking. When the ack itself re-anchored, an unseen second failure (e.g. a
+#   real dc_ipv4 -27% cliff behind the vpn step) was re-anchored too,
+#   silently and permanently: the next night was clean and no slide warning
+#   ever fired. And a TRANSIENT move acked as real dropped the pre-ack pins,
+#   so upstream's snap-back FAILED every night with no pin left to rescue it:
+#   the D-GATE-1 deadlock again. So a bare ack keeps its rule-4 meaning (this
+#   run only; pins untouched, so a recovery still self-heals), and only a
+#   metric named in OPENASN_ACK_DRIFT_REANCHOR is re-anchored.
 #
 #   A reviewed baseline is NOT a pin: it is never a release, it is written
-#   only by an ack (i.e. a human with a reason on the public record), and
+#   only by an ack that names its metric (a human with a reason on the public record), and
 #   the acked build itself stays unclean and is never pinned. D-GATE-1's
 #   "pins come from clean builds only" is unchanged - the point is to let
 #   the next clean build be clean, so pinning resumes.
@@ -94,12 +108,16 @@
 # "drift <STATUS> <metric>:" carrying the numbers and the thresholds, so a
 # green CI log always answers "did this gate run, and against what?".
 
+require "set"
 require "time"
 require_relative "env"
 
 module OpenASNPipeline
   module DriftGate
     ACK_ENV = "OPENASN_ACK_DRIFT"
+    # Comma/space-separated metric names whose ACKED value becomes a reviewed
+    # baseline (REVIEWED BASELINES above). Ignored without an ack.
+    REANCHOR_ENV = "OPENASN_ACK_DRIFT_REANCHOR"
 
     # Per-metric policy. Fractions of the previous value. `warn` applies in
     # both directions; `fail_drop` / `fail_rise` are direction-specific;
@@ -267,8 +285,13 @@ module OpenASNPipeline
     end
 
     # Reviewed baselines carried in a manifest's stats -> { metric => Reviewed }.
+    # Anything that is not a { metric => { "value" => ... } } object is
+    # ignored: a malformed stamp degrades to "no review", never a crash.
     def reviewed_from(stats)
-      (stats && stats["reviewed_baselines"] || {}).each_with_object({}) do |(metric, h), out|
+      carried = stats.is_a?(Hash) ? stats["reviewed_baselines"] : nil
+      return {} unless carried.is_a?(Hash)
+
+      carried.each_with_object({}) do |(metric, h), out|
         next unless h.is_a?(Hash) && h["value"].to_i.positive?
 
         out[metric.to_s] = Reviewed.new(metric: metric.to_s, value: h["value"].to_i, reason: h["reason"],
@@ -323,7 +346,8 @@ module OpenASNPipeline
 
     # Evaluate, log with numbers, record ack/recovery events for the
     # manifest, and raise StageFailure on :fail. Returns the Result.
-    def enforce!(metric:, now:, prev:, baselines: [], policy:, ack: ENV[ACK_ENV], gate: nil, reviewed: nil)
+    def enforce!(metric:, now:, prev:, baselines: [], policy:, ack: ENV[ACK_ENV], gate: nil, reviewed: nil,
+                 reanchor: ENV[REANCHOR_ENV])
       result = evaluate(metric: metric, now: now, prev: prev, baselines: baselines, policy: policy, ack: ack,
                         reviewed: reviewed)
       reviewed_state[metric] = result.reviewed if result.reviewed # still in effect: carry it forward
@@ -352,16 +376,32 @@ module OpenASNPipeline
                  "this build supersedes degraded published data (stamped in manifest stats.drift_recovery)")
       when :acked
         events << result
-        # The value a human just sanctioned becomes this metric's reference
-        # until a clean pin supersedes it (REVIEWED BASELINES, file header).
-        reviewed_state[metric] = Reviewed.new(metric: metric, value: result.now, reason: result.ack, reviewed_at: nil)
-        Env.warn("#{prefix}drift ACKED #{result.summary} - FAIL overridden for this run by " \
-                 "#{ACK_ENV}; stamped into manifest stats.drift_ack")
+        if reanchor_metrics(reanchor).include?(metric)
+          # The value a human just sanctioned AND named becomes this metric's
+          # reference until clean pins supersede it (REVIEWED BASELINES).
+          reviewed_state[metric] = Reviewed.new(metric: metric, value: result.now, reason: result.ack, reviewed_at: nil)
+          reanchored << metric
+          Env.warn("#{prefix}drift ACKED #{result.summary} - FAIL overridden by #{ACK_ENV}; stamped into manifest " \
+                   "stats.drift_ack, and #{metric}=#{result.now} recorded as a REVIEWED BASELINE " \
+                   "(#{REANCHOR_ENV}): weekly pins older than this no longer anchor this metric")
+        else
+          Env.warn("#{prefix}drift ACKED #{result.summary} - FAIL overridden for this run only by #{ACK_ENV}; " \
+                   "stamped into manifest stats.drift_ack. Weekly pins are unchanged: if this is a permanent " \
+                   "step change, re-run with #{REANCHOR_ENV}=#{metric} as well, or every later night WARNs as a slide")
+        end
       when :fail
+        # Name the references the gate ACTUALLY consulted. With a reviewed
+        # baseline in effect the pre-review pins are ignored; listing them
+        # anyway once printed "not within +-5% of any weekly pin
+        # (v2026.08.23=12393)" for a value of 12,400.
+        consulted, = apply_reviewed(baselines.select { |b| b.value.to_i.positive? }, result.reviewed)
+        refs = consulted.map { |b| "#{b.kind == :reviewed ? 'reviewed baseline ' : ''}#{b.label}=#{b.value}" }.join(", ")
+        refs = "no pins found" if refs.empty?
+        refs += "; weekly pins older than the reviewed baseline are ignored for this metric" if result.reviewed
         Env.fail_stage!("#{prefix}drift FAIL #{result.summary} - beyond the " \
                         "#{(policy.fail_for(result.drift) * 100).to_i}% #{result.drift.negative? ? 'drop' : 'rise'} line " \
                         "and not within +-#{(policy.recovery_band * 100).to_i}% of any weekly pin " \
-                        "(#{baselines.map { |b| "#{b.label}=#{b.value}" }.join(', ').then { |s| s.empty? ? 'no pins found' : s }}). " \
+                        "(#{refs}). " \
                         "Investigate upstream; if the new value is genuine, re-run with " \
                         "#{ACK_ENV}=\"<reason>\" (nightly-build.yml dispatch input `ack_drift`) to publish with the reason on record")
       end
@@ -388,10 +428,18 @@ module OpenASNPipeline
     # metric -> Reviewed in effect after this run. NOT an event: carrying a
     # review forward does not make a build unclean (that is its purpose).
     def reviewed_state = (@reviewed_state ||= {})
+    # Metrics an ack re-anchored this run (run.rb reports requested names
+    # that were not: a typo, or a metric that did not fail).
+    def reanchored = (@reanchored ||= [])
 
     def reset!
       @events = []
       @reviewed_state = {}
+      @reanchored = []
+    end
+
+    def reanchor_metrics(value = ENV[REANCHOR_ENV])
+      value.to_s.split(/[\s,]+/).reject(&:empty?).to_set
     end
 
     # The manifest fragment: present ONLY when something happened, so a
