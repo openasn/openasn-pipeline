@@ -109,6 +109,40 @@ module OpenASNPipeline
       }
     }.freeze
 
+    # --- Curation-scope terms (NOT Tier A) ---------------------------------------
+    # Terms governing inputs that are read at build time as curation evidence
+    # (D-CUR-1) but never compiled into a published artifact. Pinned in the same
+    # pins.json (entries carry "scope": "curation") so a change in the terms is
+    # noticed, but checked only by the tools that read those inputs - they must
+    # never block the nightly publish, which does not contain them.
+    #
+    # RIR delegated-extended stats (lib/rir_stats.rb, DECISIONS.md D-SRC-1):
+    #   * APNIC / AFRINIC declare "CONDITIONS OF USE" as section 2 of their
+    #     README-EXTENDED; the file is regenerated daily, so we pin just that
+    #     section (extract: conditions_of_use_section).
+    #   * LACNIC's equivalent is a standalone disclaimer.txt (ISO-8859-1, 2007).
+    #   * ARIN publishes no terms for the stats files. We pin its README as an
+    #     ABSENCE RECEIPT: if ARIN ever adds conditions there, the gate trips.
+    #   * RIPE NCC is excluded (restrictive site-wide terms), so nothing is pinned.
+    CURATION_TERMS_URLS = {
+      "apnic-delegated-stats" => {
+        url: "https://ftp.apnic.net/stats/apnic/README-EXTENDED.TXT",
+        extract: :conditions_of_use_section
+      },
+      "afrinic-delegated-stats" => {
+        url: "https://ftp.afrinic.net/pub/stats/afrinic/README-EXTENDED.txt",
+        extract: :conditions_of_use_section
+      },
+      "lacnic-delegated-stats" => {
+        url: "https://ftp.lacnic.net/pub/stats/lacnic/disclaimer.txt",
+        extract: :whole_file
+      },
+      "arin-delegated-stats" => {
+        url: "https://ftp.arin.net/pub/stats/arin/README",
+        extract: :whole_file
+      }
+    }.freeze
+
     # Metadata that ends up in manifest.json's `sources` array so every
     # artifact is self-describing about provenance.
     CATALOG = [

@@ -15,23 +15,39 @@ task :fetch do
   ruby "pipeline/fetch.rb"
 end
 
-desc "Re-pin upstream license SHA-256 hashes (ONLY inside a reviewed PR explaining why)"
+desc "Re-pin upstream license SHA-256 hashes (ONLY inside a reviewed PR explaining why). ONLY=id1,id2 pins just those ids and leaves every other pin untouched"
 task "licenses:pin" do
   require_relative "pipeline/lib/http"
   require_relative "pipeline/lib/license_gate"
-  OpenASNPipeline::LicenseGate.pin!
+  only = ENV["ONLY"]&.split(",")&.map(&:strip)&.reject(&:empty?)
+  OpenASNPipeline::LicenseGate.pin!(only: only)
 end
 
-desc "Verify upstream licenses against pinned hashes without building"
+desc "Verify upstream licenses against pinned hashes without building. SCOPE=tier_a|curation|all (default all; the nightly checks tier_a only)"
 task "licenses:check" do
   require_relative "pipeline/lib/http"
   require_relative "pipeline/lib/license_gate"
-  OpenASNPipeline::LicenseGate.run
+  OpenASNPipeline::LicenseGate.run(scope: ENV.fetch("SCOPE", "all").to_sym)
 end
 
 desc "Generate override candidate lists from cached data (curation aid, writes build/work/candidates/)"
 task "overrides:candidates" do
   ruby "pipeline/tools/override_candidates.rb"
+end
+
+desc "RIR delegated-extended stats -> build/work/rir/ (registry + holder clusters; NOT published, D-SRC-1). RIPE only with OPENASN_RIR_INCLUDE_RIPE=1"
+task "sources:rir" do
+  require_relative "pipeline/lib/http"
+  require_relative "pipeline/lib/license_gate"
+  require_relative "pipeline/lib/rir_stats"
+  offline = ENV["OFFLINE"] == "1"
+  OpenASNPipeline::LicenseGate.run(offline: offline, scope: :curation)
+  puts JSON.pretty_generate(OpenASNPipeline::RirStats.build(offline: offline)[:stats])
+end
+
+desc "Sibling candidates for data/overrides/ from RIR holder clusters (curation aid, writes build/work/candidates/*.rir-siblings.txt)"
+task "overrides:rir_siblings" do
+  ruby "pipeline/tools/rir_siblings.rb"
 end
 
 # --- LLM enrichment pilot (operator tooling; never part of `rake build`) ----
