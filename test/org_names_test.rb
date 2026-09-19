@@ -155,6 +155,7 @@ module OpenASNPipeline
                  64_500 => AsJson::Record.new(64_500, "SOME WHOIS DESCR", "DE", "isp", "access_provider") }
         Publish.write_asn_categories_csv({ asn_meta: meta },
                                          { flags_by_asn: Hash.new(0), org_names: { 15_169 => { "name" => "Google" } },
+                                           base_v4: [[0, 255, 64_500, 0]], # routed, so written (CD-19d)
                                            countries: { 15_169 => { "cc" => "US", "source" => "override" } } })
         rows = CSV.read(File.join(dir, "asn-categories.csv"))
         assert_equal %w[asn org country category network_role openasn_flags], rows[0]

@@ -10,8 +10,8 @@
 #   SHA256SUMS                          - plain checksums (sha256sum -c compatible)
 #   fetch-manifest.json                 - Tier B spec for clients (repo copy)
 #   ATTRIBUTION.md                      - license attributions (repo copy)
-#   asn-categories.csv                  - convenience CSV (CC0): the full
-#                                         ASN -> category/role/flags table
+#   asn-categories.csv                  - convenience CSV (CC0): routed or
+#                                         field-bearing ASNs -> org/country/category/role/flags
 #
 # Upload model (founding decision; see data-repo README "What you get"): a rolling `latest` release updated nightly is the
 # free-CDN distribution channel (precedent: sapics/ip-location-db,
@@ -64,15 +64,26 @@ module OpenASNPipeline
     # `country` is the CC0 country (asn_country.txt, then Wikidata; D-SRC-2,
     # country): where the ASN's operator is based. It is EMPTY when we hold no
     # clean value, and never ipverse's countryCode, which is RIR registry data.
+    #
+    # ROW SET (coordinator decision CD-19d; data-repo FORMAT.md
+    # "asn-categories.csv"): a row is written only for an ASN that is routed
+    # in our backbone (it originates a base range in openasn-ipv4/ipv6.bin)
+    # OR carries at least one field: an org, a country, a category or role,
+    # or a flag. The candidates are still ipverse's assigned-ASN list, but an
+    # unrouted ASN with nothing to say is no longer written: that row would
+    # only restate a registry assignment. The columns are unchanged.
     def write_asn_categories_csv(normalized, compiled)
       flags_by_asn = compiled[:flags_by_asn]
       org_names = compiled[:org_names] || {}
       countries = compiled[:countries] || {}
+      routed = routed_asns(compiled)
       path = File.join(DIST_DIR, "asn-categories.csv")
       CSV.open("#{path}.tmp", "wb") do |csv|
         csv << %w[asn org country category network_role openasn_flags]
         normalized[:asn_meta].keys.sort.each do |asn|
           flags = flags_by_asn[asn]
+          next unless routed.include?(asn) || flags.nonzero? || org_names.key?(asn) || countries.key?(asn)
+
           csv << [asn, org_names.dig(asn, "name"), countries.dig(asn, "cc"),
                   AsJson::CATEGORY_NAMES[flags & Binary::CATEGORY_MASK],
                   AsJson::ROLE_NAMES[(flags & Binary::ROLE_MASK) >> Binary::ROLE_SHIFT],
@@ -80,6 +91,14 @@ module OpenASNPipeline
         end
       end
       File.rename("#{path}.tmp", path)
+    end
+
+    # ASNs that originate at least one base range in the compiled artifacts
+    # (the BGP backbone, plus ranges gap-filled for curated ASNs).
+    def routed_asns(compiled)
+      set = {}
+      [compiled[:base_v4], compiled[:base_v6]].each { |base| (base || []).each { |r| set[r[2]] = true } }
+      set
     end
 
     def flag_names(flags)
@@ -408,7 +427,7 @@ def records_for(name, artifacts, path)
         |---|---|
         | `openasn-ipv4.bin` / `openasn-ipv6.bin` | packed classification artifacts (format: FORMAT.md) |
         | `manifest.json` | build id, per-file SHA-256, source provenance |
-        | `asn-categories.csv` | full ASN → category/role/flags table (CC0) |
+        | `asn-categories.csv` | routed or field-bearing ASN → org/country/category/role/flags table (CC0) |
         | `fetch-manifest.json` | Tier B source spec executed by clients |
         | `ATTRIBUTION.md` | upstream attributions |
         | `SHA256SUMS` | `sha256sum -c` compatible checksums |

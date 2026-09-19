@@ -47,7 +47,7 @@ Artifacts are rebuilt and mirrored here **nightly**.
 
 | file | what |
 |---|---|
-| `asn-categories.csv` | every ASN → org, country, category, network role, OpenASN flags — the load-me-first table (backs the dataset viewer). `org` and `country` are filled only where we hold a CC0 value (our sourced overrides + Wikidata); they are empty elsewhere. `country` is where the ASN's operator is based (ISO 3166-1 alpha-2), not a registry country |
+| `asn-categories.csv` | every routed ASN, and every other ASN we hold a field for → org, country, category, network role, OpenASN flags — the load-me-first table (backs the dataset viewer). `org` and `country` are filled only where we hold a CC0 value (our sourced overrides + Wikidata); they are empty elsewhere. `country` is where the ASN's operator is based (ISO 3166-1 alpha-2), not a registry country |
 | `openasn-ipv4.bin` / `openasn-ipv6.bin` | packed classification artifacts: IP→ASN backbone + VPN/datacenter overlays, queryable in microseconds ([byte spec](https://github.com/openasn/openasn/blob/main/FORMAT.md)) |
 | `openasn-orgs.bin` | packed ASN→organization names (CC0 sources only; see the data repo's DECISIONS.md D-SRC-2) |
 | `manifest.json` | build id, per-file SHA-256, full source provenance |

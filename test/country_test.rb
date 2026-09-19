@@ -234,6 +234,7 @@ module OpenASNPipeline
                  64_500 => AsJson::Record.new(64_500, "WHOIS DESCR", "QQ", "isp", "access_provider") }
         Publish.write_asn_categories_csv({ asn_meta: meta },
                                          { flags_by_asn: Hash.new(0), org_names: {},
+                                           base_v4: [[0, 255, 64_500, 0]], # routed, so written (CD-19d)
                                            countries: { 3352 => { "cc" => "ES", "source" => "override" } } })
         rows = CSV.read(File.join(dir, "asn-categories.csv"))
         assert_equal %w[asn org country category network_role openasn_flags], rows[0]
@@ -242,6 +243,43 @@ module OpenASNPipeline
         body = File.read(File.join(dir, "asn-categories.csv"))
         refute_includes body, "ZZ"
         refute_includes body, "QQ"
+      ensure
+        silence { OpenASNPipeline.const_set(:DIST_DIR, old) }
+      end
+    end
+
+    def silence
+      verbose = $VERBOSE
+      $VERBOSE = nil
+      yield
+    ensure
+      $VERBOSE = verbose
+    end
+  end
+
+  # CD-19d: an unrouted ASN is written only if it carries a field (org,
+  # country, category/role or flag). The columns never change.
+  class CsvRowSetTest < Minitest::Test
+    def test_unrouted_rows_without_any_field_are_not_written
+      Dir.mktmpdir do |dir|
+        old = OpenASNPipeline::DIST_DIR
+        silence { OpenASNPipeline.const_set(:DIST_DIR, dir) }
+        meta = [64_496, 64_497, 64_498, 64_499, 64_500, 64_501, 64_502].to_h do |a|
+          [a, AsJson::Record.new(a, "WHOIS DESCR", "ZZ", nil, nil)]
+        end
+        flags = Hash.new(0).merge(64_499 => 1, 64_500 => Binary::FLAG_VPN_PROVIDER) # 1 = category isp
+        Publish.write_asn_categories_csv(
+          { asn_meta: meta },
+          { flags_by_asn: flags, org_names: { 64_497 => { "name" => "Named" } },
+            countries: { 64_498 => { "cc" => "ES", "source" => "override" } },
+            base_v4: [[0, 255, 64_496, 0]], base_v6: [[0, 255, 64_501, 0]] }
+        )
+        rows = CSV.read(File.join(dir, "asn-categories.csv"))
+        assert_equal %w[asn org country category network_role openasn_flags], rows[0]
+        # routed v4, org, country, category, flag, routed v6 kept; 64502 (nothing) dropped
+        assert_equal %w[64496 64497 64498 64499 64500 64501], rows[1..].map(&:first)
+        assert_equal "isp", rows[4][3]
+        assert_equal "vpn_provider", rows[5][5]
       ensure
         silence { OpenASNPipeline.const_set(:DIST_DIR, old) }
       end
