@@ -3,131 +3,107 @@
 require_relative "test_helper"
 require "tmpdir"
 require_relative "../pipeline/lib/x4b_first_party"
+require_relative "../pipeline/lib/sources"
 require_relative "../pipeline/normalize"
 
 module OpenASNPipeline
-  # X4B's published output/vpn/ipv4.txt merges Apple iCloud Private Relay
-  # egress, Mullvad, PIA and Proton feeds (Tier B for OpenASN). These tests
-  # pin the first-party restriction that keeps them out of the core
-  # (lib/x4b_first_party.rb; data-repo DECISIONS.md D-SRC-3). The addresses
-  # are the real ones from the 2026-09-19 audit.
+  # The X4B overlays are OpenASN's own expansion of X4B's hand-curated inputs
+  # (ASN.txt against our backbone, plus ips/Manual.txt). X4B's generated
+  # output/ is never read: it merges third-party feeds (D-SRC-3) and, since
+  # X4BNet/lists_vpn ea035c77 / fdf1db6a (2026-10-29), is cut from the CC BY-SA
+  # IPLocate database and carries keyword-matched networks (D-SRC-4). The
+  # addresses are the real ones from the 2026-09-19 audit.
   class X4BFirstPartyTest < Minitest::Test
     def r(cidr) = IPMath.cidr_to_range(cidr).first(2)
     def ip(str) = IPMath.v4_to_int(str)
     def covers?(ranges, addr) = !IPMath.find_range(ranges, ip(addr)).nil?
 
     # Backbone: Cloudflare (Apple relay egress lives here), M247, the Tor
-    # ASN X4B lists, and ProtonVPN's own ASN.
+    # ASN X4B lists, ProtonVPN's own ASN, and a parent /16 of a listed ASN
+    # with a more specific /24 announced by an unlisted ASN.
     BASE = [
       ["104.28.0.0/16",    13_335],
       ["146.70.107.0/24",  9009],
       ["149.88.16.0/22",   208_172],
-      ["185.220.101.0/24", 60_729]
+      ["185.220.101.0/24", 60_729],
+      ["198.18.0.0/24",    64_500],
+      ["198.18.1.0/24",    64_501], # child announced by an unlisted ASN
+      ["198.18.2.0/23",    64_500]
     ].freeze
 
     def base_rows
       BASE.map { |cidr, asn| r(cidr) + [asn] }.sort_by(&:first)
     end
 
-    # What X4B publishes: its ASN expansion + Manual.txt + the feed files.
-    def published
-      IPMath.merge_ranges([
-        r("104.28.28.0/26"), r("104.28.28.64/29"), r("104.28.28.72/30"), r("104.28.28.76/32"), # apple.txt
-        r("146.70.107.0/24"),                                                                 # AS9009 expansion
-        r("149.88.16.10/32"),                                                                 # protonvpn.txt, inside AS208172
-        r("185.220.101.0/24"),                                                                # AS60729 expansion
-        r("194.5.52.0/23"),                                                                   # Manual.txt
-        r("198.51.100.7/32")                                                                  # pia.txt, unrouted here
-      ])
+    def expand(asns: Set[9009, 208_172, 60_729, 64_500], manual: [r("194.5.52.0/23")])
+      X4BFirstParty.expand(base_rows: base_rows, asns: asns, manual: manual)
     end
 
-    def restrict
-      X4BFirstParty.restrict(published, base_rows: base_rows,
-                                        asns: Set[9009, 208_172, 60_729],
-                                        manual: [r("194.5.52.0/23")])
-    end
-
-    def test_apple_private_relay_egress_is_never_kept
-      kept = restrict.ranges
-      %w[104.28.28.0 104.28.28.1 104.28.28.63 104.28.28.64 104.28.28.76].each do |addr|
-        refute covers?(kept, addr), "#{addr} is Apple Private Relay egress (Tier B relay) and must not survive"
-      end
-    end
-
-    def test_first_party_asn_space_and_manual_netblocks_are_kept
-      kept = restrict.ranges
+    def test_first_party_asn_space_and_manual_netblocks_are_the_overlay
+      kept = expand.ranges
       assert covers?(kept, "146.70.107.100"), "AS9009 is in X4B's own ASN list"
       assert covers?(kept, "185.220.101.5"), "AS60729 is in X4B's own ASN list"
+      assert covers?(kept, "149.88.16.10"), "a listed ASN covers its whole backbone space"
+      assert covers?(kept, "149.88.19.255")
       assert covers?(kept, "194.5.52.1"), "Manual.txt netblock"
       assert covers?(kept, "194.5.53.255"), "Manual.txt /23 upper edge"
     end
 
-    def test_a_feed_entry_inside_a_listed_asn_stays_because_the_asn_justifies_it
-      assert covers?(restrict.ranges, "149.88.16.10")
+    def test_space_of_unlisted_asns_never_enters
+      kept = expand.ranges
+      # Apple Private Relay egress inside Cloudflare (a feed in X4B's output,
+      # Tier B for us) and anything a keyword match would add: neither is an
+      # input, so neither can appear.
+      refute covers?(kept, "104.28.28.1")
+      refute covers?(kept, "198.51.100.7")
     end
 
-    def test_a_feed_entry_outside_every_listed_asn_is_dropped
-      refute covers?(restrict.ranges, "198.51.100.7")
+    def test_a_child_prefix_announced_by_an_unlisted_asn_follows_the_backbone
+      # X4B's IPLocate build includes children of a listed parent; the
+      # backbone attributes this /24 to AS64501, so it stays out (recall cost,
+      # never a precision cost).
+      kept = expand.ranges
+      assert covers?(kept, "198.18.0.255")
+      refute covers?(kept, "198.18.1.1")
+      assert covers?(kept, "198.18.2.0")
     end
 
-    def test_the_restriction_never_adds_space_x4b_did_not_publish
-      kept = restrict.ranges
-      # AS208172's backbone /22 is listed, but X4B only published one /32 of it.
-      refute covers?(kept, "149.88.16.11")
-      assert_empty IPMath.intersect_ranges(kept, [[0, published.first[0] - 1]])
-      kept.each do |(s, e)|
-        assert_equal e - s + 1, IPMath.address_count(IPMath.intersect_ranges([[s, e]], published)),
-                     "#{IPMath.int_to_v4(s)}-#{IPMath.int_to_v4(e)} is not inside the published list"
-      end
-    end
-
-    def test_result_accounts_for_every_dropped_address
-      res = restrict
-      assert_equal IPMath.address_count(published), res.published_addresses
-      # apple 64+8+4+1 = 77, pia 1
-      assert_equal 78, res.dropped_addresses
-      assert_equal res.published_addresses - 78, res.kept_addresses
+    def test_result_counts
+      res = expand
+      assert_equal 4, res.asns
+      assert_equal 5, res.asn_ranges
+      assert_equal 1, res.manual_ranges
+      assert_equal IPMath.address_count(res.ranges), res.addresses
     end
 
     def test_an_empty_asn_list_keeps_only_manual_space
-      res = X4BFirstParty.restrict(published, base_rows: base_rows, asns: Set.new, manual: [r("194.5.52.0/23")])
-      assert_equal [r("194.5.52.0/23")], res.ranges
+      assert_equal [r("194.5.52.0/23")], expand(asns: Set.new).ranges
     end
 
-    # --- datacenter: blacklist of the named feed file ------------------------
-
-    def dc_published
-      IPMath.merge_ranges([
-        r("35.208.0.0/15"),     # X4B expansion of AS15169 via iptoasn; our backbone disagrees on the origin
-        r("146.70.107.0/24"),   # AS9009 expansion
-        r("149.88.16.10/32"),   # dc protonvpn.txt, inside listed AS208172
-        r("203.0.113.9/32")     # dc protonvpn.txt, outside every listed ASN
-      ])
+    def test_exclusion_lines_are_not_includes
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "ASN.txt")
+        File.write(path, "# header\nAS9009 # M247\n-AS13335 # exclusion, X4B builder syntax\n  AS64496 indented\nAS208172\n")
+        assert_equal Set[9009, 208_172], Normalize.parse_x4b_asn_file(path)
+      end
     end
 
-    def strip
-      X4BFirstParty.strip_feeds(dc_published, feeds: [r("149.88.16.10/32"), r("203.0.113.9/32")],
-                                              base_rows: base_rows, asns: Set[9009, 208_172], manual: [])
-    end
+    # The legal guard (D-SRC-4). Every X4B URL the pipeline knows must be one
+    # of the four curated files; output/, Keywords.txt and the third-party
+    # feeds under input/*/ips/ must never come back.
+    CURATED = %w[input/vpn/ASN.txt input/datacenter/ASN.txt
+                 input/vpn/ips/Manual.txt input/datacenter/ips/Manual.txt].freeze
 
-    def test_strip_feeds_removes_only_unjustified_feed_space
-      kept = strip.ranges
-      refute covers?(kept, "203.0.113.9"), "third-party feed entry outside every listed ASN"
-      assert covers?(kept, "149.88.16.10"), "feed entry inside a listed ASN stays"
-      assert covers?(kept, "146.70.107.1")
-      assert_equal 1, strip.dropped_addresses
-    end
-
-    def test_strip_feeds_keeps_published_space_our_backbone_does_not_explain
-      # The reason dc is not a whitelist: X4B's ASN expansion and our
-      # backbone disagree on real cloud space, and that is not feed data.
-      assert covers?(strip.ranges, "35.208.0.1")
-      assert covers?(strip.ranges, "35.209.255.255")
-    end
-
-    def test_strip_feeds_with_no_feeds_is_the_identity
-      res = X4BFirstParty.strip_feeds(dc_published, feeds: [], base_rows: base_rows, asns: Set.new, manual: [])
-      assert_equal dc_published, res.ranges
+    def test_only_x4b_curated_inputs_are_fetched
+      x4b = Sources.constants.filter_map do |c|
+        v = Sources.const_get(c)
+        v if v.is_a?(String) && v.include?("X4BNet/lists_vpn/") && v.start_with?("https://raw.")
+      end
+      paths = x4b.map { |u| u.sub(%r{\Ahttps://raw\.githubusercontent\.com/X4BNet/lists_vpn/[^/]+/}, "") }
+      assert_equal CURATED.sort, paths.sort
+      refute Sources.const_defined?(:X4B_DC_FEEDS), "third-party feed files are no longer read at all"
+      fetch_src = File.read(File.expand_path("../pipeline/fetch.rb", __dir__))
+      refute_match(%r{output/|Keywords}, fetch_src)
     end
 
     def test_subtract_ranges
@@ -145,9 +121,7 @@ module OpenASNPipeline
     end
   end
 
-  # End to end through Normalize.run and the reference classifier: the
-  # published X4B file contains Apple relay space; the compiled artifact must
-  # not answer :vpn for it.
+  # End to end through Normalize.run and the reference classifier.
   class X4BNormalizeIntegrationTest < Minitest::Test
     def setup
       @dir = Dir.mktmpdir("x4b-fp")
@@ -175,33 +149,33 @@ module OpenASNPipeline
       sc.remove_method(:__x4b_test_orig_pam)
     end
 
+    # No :x4b_vpn / :x4b_dc output files at all: Normalize must not need them.
     def paths
       {
         backbone_v4: write("v4.csv", [
+          "#{v4('35.208.0.0')},#{v4('35.209.255.255')},43515,\"X\"",
           "#{v4('104.28.0.0')},#{v4('104.28.255.255')},13335,\"CLOUDFLARENET\"",
-          "#{v4('146.70.107.0')},#{v4('146.70.107.255')},9009,\"M247\""
+          "#{v4('146.70.107.0')},#{v4('146.70.107.255')},9009,\"M247\"",
+          "#{v4('203.0.113.0')},#{v4('203.0.113.255')},64497,\"X\""
         ].join("\n") + "\n"),
         backbone_v6: write("v6.csv", "#{IPAddr.new('2001:db8::').to_i},#{IPAddr.new('2001:db8::ffff').to_i},64496,\"X\"\n"),
         as_json: write("as.json", "[]"), # see without_as_metadata
-        x4b_vpn: write("vpn.txt", "104.28.28.0/26\n104.28.28.64/29\n146.70.107.0/24\n194.5.52.0/23\n"),
-        x4b_dc: write("dc.txt", "35.208.0.0/15\n146.70.107.0/24\n203.0.113.9/32\n"),
         x4b_vpn_asn: write("vpn-asn.txt", "AS9009 # M247, GB (NordVPN)\n"),
-        x4b_dc_asn: write("dc-asn.txt", "AS64496 # example\n"),
+        x4b_dc_asn: write("dc-asn.txt", "AS64497 # example\n-AS43515 # exclusion line, ignored\n"),
         x4b_vpn_manual: write("vpn-manual.txt", "# Manually added netblocks\n# Comment description manditory\n" \
                                                 "194.5.52.0/23 # VPN Consumer Network Services (https://github.com/X4BNet/lists_vpn/issues/171)\n"),
         x4b_dc_manual: write("dc-manual.txt", "# Manually added netblocks\n# Comment description manditory"),
-        x4b_dc_feeds: [write("dc-protonvpn.txt", "203.0.113.9\n")],
         bad_asn: write("bad.csv", "ASN,Entity\n"),
         wikidata: write("wikidata.json", %q({"results":{"bindings":[]}})),
         wikidata_countries: write("wikidata-countries.json", %q({"results":{"bindings":[]}}))
       }
     end
 
-    def test_apple_relay_sample_never_gets_verdict_vpn_from_x4b
+    def test_overlays_are_the_curated_inputs_expanded_against_our_backbone
       n = without_as_metadata { Normalize.run(paths) }
       assert_equal [[v4("146.70.107.0"), v4("146.70.107.255")], [v4("194.5.52.0"), v4("194.5.53.255")]], n[:vpn_v4]
-      # dc loses only the feed entry; unexplained-but-not-feed space stays.
-      assert_equal [[v4("35.208.0.0"), v4("35.209.255.255")], [v4("146.70.107.0"), v4("146.70.107.255")]], n[:dc_v4]
+      # dc = dc ASNs ∪ vpn ASNs (X4B's dc list inherits vpn includes) + dc Manual.txt.
+      assert_equal [[v4("146.70.107.0"), v4("146.70.107.255")], [v4("203.0.113.0"), v4("203.0.113.255")]], n[:dc_v4]
 
       hosting = AsJson::CATEGORY_CODES["hosting"]
       path = File.join(@dir, "t.bin")
@@ -219,6 +193,13 @@ module OpenASNPipeline
 
       manual = Classifier.classify(art, v4("194.5.52.10"))
       assert_equal %i[vpn x4b_vpn], [manual.verdict, manual.rule]
+
+      dc = Classifier.classify(art, v4("203.0.113.9"))
+      assert_equal %i[hosting x4b_dc], [dc.verdict, dc.rule]
+
+      # Not in any curated input: classified by its own ASN, never by x4b_dc.
+      gcp = Classifier.classify(art, v4("35.208.0.1"))
+      assert_equal %i[hosting asn_category], [gcp.verdict, gcp.rule]
     end
   end
 end

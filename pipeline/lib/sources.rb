@@ -119,28 +119,27 @@ module OpenASNPipeline
     # paths 301-redirect, we use the canonical one).
     IPVERSE_AS_BLOCKS_RAW = "https://raw.githubusercontent.com/ipverse/as-ip-blocks/master/as/%d/%s-aggregated.txt"
 
-    # --- X4BNet/lists_vpn: VPN + datacenter range overlays --------------------
-    # MIT, and the README explicitly extends the license to "the list itself
-    # (source files and generated output)" - the wording that makes X4B
-    # redistributable when most aggregated lists are not (quote pinned in data/licenses/).
+    # --- X4BNet/lists_vpn: hand-curated VPN + datacenter ASNs and netblocks --
+    # MIT. X4B's README grants it on "the scripts, automation, curated source
+    # files, and generated IP lists" (quote pinned in data/licenses/).
     #
-    # BUT the generated output also merges third-party feeds X4B does not own
-    # (Apple Private Relay, Mullvad, PIA, Proton - all Tier B for us). The
-    # published output/ files are therefore only an UPPER BOUND: normalize.rb
-    # keeps vpn ranges only where X4B's first-party inputs (ASN.txt expanded
-    # against our backbone, plus ips/Manual.txt) justify them, and strips the
-    # named third-party file from the datacenter list. Rationale and
-    # measurements: lib/x4b_first_party.rb, data-repo DECISIONS.md D-SRC-3.
+    # ONLY THE CURATED INPUTS ARE READ (data-repo DECISIONS.md D-SRC-4).
+    # X4B's generated output/<list>/ipv4.txt is NOT a Tier A input any more:
+    # since X4BNet/lists_vpn ea035c77 (2026-10-29) it is cut from the IPLocate
+    # ip-to-asn database (CC BY-SA 4.0, ShareAlike never enters the core) and,
+    # since fdf1db6a, also carries networks selected by keyword match on
+    # IPLocate's name/org/domain (input/*/Keywords.txt). Before that it already
+    # merged third-party feeds (Apple relay, Mullvad, PIA, Proton; D-SRC-3).
+    # OpenASN expands the curated ASNs against its OWN backbone instead
+    # (lib/x4b_first_party.rb). Do not add an output/, Keywords.txt or feed
+    # URL here: test/x4b_first_party_test.rb fails the suite if one appears.
     #
-    # GOTCHA: the legacy root ipv4.txt path was REMOVED in 2026 (it broke
-    # MISP's generator which still hardcodes it). Only output/... paths are
-    # stable. IPv4 only - X4B publishes no IPv6; v6 VPN signal comes from
-    # ASN-level overrides instead (see compile.rb).
-    X4B_VPN_URL = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt"
-    X4B_DC_URL  = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt"
-    # Hand-curated ASN input files (first-party curation, MIT) - seeds for
-    # data/overrides/, the crosscheck reference set, and the first-party
-    # restriction of the overlays above.
+    # IPv4 only in the core: FORMAT.md overlays are v4; v6 VPN signal comes
+    # from ASN-level overrides (compile.rb). input/*/ips/Manual-ipv6.txt is
+    # not read.
+    #
+    # Hand-curated ASN input files (first-party curation, MIT) - the vpn/dc
+    # overlays, seeds for data/overrides/, and the crosscheck reference set.
     X4B_VPN_ASN_URL = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/vpn/ASN.txt"
     X4B_DC_ASN_URL  = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/datacenter/ASN.txt"
     # Hand-curated netblocks (first-party, MIT; "Comment description
@@ -148,13 +147,6 @@ module OpenASNPipeline
     # are first-party - every sibling there is a third-party feed.
     X4B_VPN_MANUAL_URL = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/vpn/ips/Manual.txt"
     X4B_DC_MANUAL_URL  = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/datacenter/ips/Manual.txt"
-    # Third-party feed files X4B merges into output/datacenter/ipv4.txt. Read
-    # ONLY to subtract them (D-CUR-1 consultation; never republished). No X4B
-    # workflow writes to input/datacenter/ips/ today - if one ever does, add
-    # its file here (lib/x4b_first_party.rb explains why dc is a blacklist).
-    X4B_DC_FEEDS = {
-      "input/datacenter/ips/protonvpn.txt" => "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/input/datacenter/ips/protonvpn.txt"
-    }.freeze
 
     # --- Wikidata P3797: ASN -> operator item label (CC0) --------------------
     # The CC0 half of the published org names. lib/wikidata_names.rb holds the
@@ -185,9 +177,10 @@ module OpenASNPipeline
     #   * sapics (LEGACY, OPENASN_BACKBONE=sapics only - see license_urls):
     #     license is declared in origin-asn/SOURCES.md (first line is the
     #     PDDL statement) - we pin that whole file (verified 2026-07-04).
-    #   * X4BNet: MIT lives in README.md under a "# License" heading, with the
-    #     load-bearing sentence extending it to "the list itself (source files
-    #     and generated output)". We pin just that extracted section so
+    #   * X4BNet: MIT lives in README.md under a "# License" heading. Since
+    #     2026-10-29 the load-bearing words are "curated source files" (the
+    #     only part OpenASN reads, D-SRC-4); before, "the list itself (source
+    #     files and generated output)". We pin just that extracted section so
     #     unrelated README churn (stats, docs) doesn't trip the gate, but any
     #     edit to the grant itself does. Extraction: license_gate.rb.
     LICENSE_URLS = {
