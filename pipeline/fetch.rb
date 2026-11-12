@@ -23,8 +23,6 @@ module OpenASNPipeline
       sapics_v4: "sapics/origin-asn-ipv4-num.csv",
       sapics_v6: "sapics/origin-asn-ipv6-num.csv",
       as_json: "ipverse/as.json",
-      x4b_vpn: "x4bnet/vpn-ipv4.txt",
-      x4b_dc: "x4bnet/datacenter-ipv4.txt",
       x4b_vpn_asn: "x4bnet/input-vpn-ASN.txt",
       x4b_dc_asn: "x4bnet/input-datacenter-ASN.txt",
       x4b_vpn_manual: "x4bnet/input-vpn-ips-Manual.txt",
@@ -56,21 +54,13 @@ module OpenASNPipeline
 
       paths[:as_json] = http.fetch(Sources::IPVERSE_AS_JSON_URL, KEYS[:as_json], offline: offline)
 
-      paths[:x4b_vpn]     = http.fetch(Sources::X4B_VPN_URL, KEYS[:x4b_vpn], offline: offline)
-      paths[:x4b_dc]      = http.fetch(Sources::X4B_DC_URL, KEYS[:x4b_dc], offline: offline)
+      # X4B: hand-curated inputs only, never its generated lists (D-SRC-4).
       paths[:x4b_vpn_asn] = http.fetch(Sources::X4B_VPN_ASN_URL, KEYS[:x4b_vpn_asn], offline: offline)
       paths[:x4b_dc_asn]  = http.fetch(Sources::X4B_DC_ASN_URL, KEYS[:x4b_dc_asn], offline: offline)
       # No size floor below for the Manual.txt files: a comment-only file is
       # legitimate (input/datacenter/ips/Manual.txt is exactly that today).
       paths[:x4b_vpn_manual] = http.fetch(Sources::X4B_VPN_MANUAL_URL, KEYS[:x4b_vpn_manual], offline: offline)
       paths[:x4b_dc_manual]  = http.fetch(Sources::X4B_DC_MANUAL_URL, KEYS[:x4b_dc_manual], offline: offline)
-      # Third-party files, fetched only to be SUBTRACTED from the dc overlay.
-      # http.fetch, not fetch_optional: a transient failure must fall back to
-      # yesterday's copy (over-subtracting is harmless) or fail loudly -
-      # never silently skip the subtraction and republish the feed.
-      paths[:x4b_dc_feeds] = Sources::X4B_DC_FEEDS.map do |rel, url|
-        http.fetch(url, "x4bnet/feeds/#{rel.tr('/', '-')}", offline: offline)
-      end
 
       paths[:bad_asn] = http.fetch(Sources::BAD_ASN_URL, KEYS[:bad_asn], offline: offline)
 
@@ -83,7 +73,7 @@ module OpenASNPipeline
       # body with HTTP 200 before we waste a build on it. Real validation
       # gates run later (validate.rb); this is just "is it plausibly data".
       min_bytes = { backbone_v4: 5_000_000, backbone_v6: 1_000_000, as_json: 10_000_000,
-                    x4b_vpn: 50_000, x4b_dc: 200_000, x4b_vpn_asn: 100,
+                    x4b_vpn_asn: 100,
                     x4b_dc_asn: 5_000, bad_asn: 5_000, wikidata: 100_000,
                     wikidata_countries: 50_000 }
       min_bytes.each do |key, floor|

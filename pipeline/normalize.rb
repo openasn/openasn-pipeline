@@ -8,8 +8,9 @@
 # Canonical shapes produced:
 #   base_v4 / base_v6 : sorted arrays of [start_int, end_int, asn]
 #   asn_meta          : { asn => AsJson::Record }
-#   vpn_v4 / dc_v4    : sorted merged arrays of [start_int, end_int], with
-#                       X4B's third-party feeds removed (lib/x4b_first_party.rb)
+#   vpn_v4 / dc_v4    : sorted merged arrays of [start_int, end_int]: X4B's
+#                       hand-curated inputs expanded against our backbone
+#                       (lib/x4b_first_party.rb)
 #   bad_asns          : Set[Integer]
 #   x4b_vpn_asns / x4b_dc_asns : Set[Integer] (crosscheck reference + seeds)
 #   wikidata_names    : { asn => { "name", "qid" } } (CC0 org names, D-SRC-2)
@@ -43,23 +44,19 @@ module OpenASNPipeline
       out[:x4b_vpn_asns] = parse_x4b_asn_file(paths[:x4b_vpn_asn])
       out[:x4b_dc_asns]  = parse_x4b_asn_file(paths[:x4b_dc_asn])
 
-      # X4B's published overlays merge third-party feeds (Apple relay,
-      # Mullvad, PIA, Proton) that are Tier B for us. vpn keeps only what
-      # X4B's own first-party inputs justify; dc has the named feed file
-      # stripped (lib/x4b_first_party.rb says why the methods differ;
-      # data-repo DECISIONS.md D-SRC-3). dc is justified by BOTH ASN lists
-      # because X4B's build-list.yml expands input/vpn/ASN.txt into it too.
-      vpn_published = parse_cidr_list(paths[:x4b_vpn], "x4b vpn")
-      res = X4BFirstParty.restrict(vpn_published, base_rows: out[:base_v4], asns: out[:x4b_vpn_asns],
-                                                  manual: parse_cidr_list(paths[:x4b_vpn_manual], "x4b vpn Manual.txt"))
+      # X4B overlays: OpenASN's own expansion of X4B's hand-curated inputs
+      # (ASN.txt against our backbone, plus ips/Manual.txt). X4B's generated
+      # output/ is not read: since 2026-10-29 it is cut from the CC BY-SA
+      # IPLocate database and carries keyword-matched networks (data-repo
+      # DECISIONS.md D-SRC-4; lib/x4b_first_party.rb). dc is expanded from
+      # BOTH ASN lists because X4B's datacenter list inherits its vpn ASNs.
+      res = X4BFirstParty.expand(base_rows: out[:base_v4], asns: out[:x4b_vpn_asns],
+                                 manual: parse_cidr_list(paths[:x4b_vpn_manual], "x4b vpn Manual.txt"))
       X4BFirstParty.log("x4b vpn", res)
       out[:vpn_v4] = res.ranges
 
-      dc_published = parse_cidr_list(paths[:x4b_dc], "x4b datacenter")
-      dc_feeds = IPMath.merge_ranges(paths[:x4b_dc_feeds].flat_map { |p| parse_cidr_list(p, "x4b dc feed #{File.basename(p)}") })
-      res = X4BFirstParty.strip_feeds(dc_published, feeds: dc_feeds, base_rows: out[:base_v4],
-                                                    asns: out[:x4b_dc_asns] | out[:x4b_vpn_asns],
-                                                    manual: parse_cidr_list(paths[:x4b_dc_manual], "x4b datacenter Manual.txt"))
+      res = X4BFirstParty.expand(base_rows: out[:base_v4], asns: out[:x4b_dc_asns] | out[:x4b_vpn_asns],
+                                 manual: parse_cidr_list(paths[:x4b_dc_manual], "x4b datacenter Manual.txt"))
       X4BFirstParty.log("x4b datacenter", res)
       out[:dc_v4] = res.ranges
 
@@ -193,7 +190,9 @@ module OpenASNPipeline
       asns
     end
 
-    # X4B input files: `AS262978 # Centro de Tecnologia...` per line.
+    # X4B input files: `AS262978 # Centro de Tecnologia...` per line. Only
+    # lines that START with `AS<n>` are includes; `-AS<n>` exclusion lines
+    # (supported by X4B's builder since 2026-10-29) are deliberately skipped.
     def parse_x4b_asn_file(path)
       asns = Set.new
       File.foreach(path) do |line|

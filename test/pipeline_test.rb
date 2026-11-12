@@ -133,6 +133,34 @@ module OpenASNPipeline
       refute_includes extracted, "Contributing"
     end
 
+    # X4B's wording since X4BNet/lists_vpn ea035c77 (2026-10-29): a new
+    # "## ASN database" section (IPLocate, CC BY-SA 4.0) sits ABOVE the
+    # License heading and is not part of the pinned extract (D-SRC-4).
+    def test_x4b_license_section_extraction_2026_10_wording
+      readme = <<~MD
+        ## ASN database
+
+        The upstream IPLocate database is licensed under CC BY-SA 4.0.
+
+        # License
+
+        The scripts, automation, curated source files, and generated IP lists produced by
+        this project are licensed under the MIT License. Upstream database licenses are
+        identified in the ASN database section above.
+
+        ```
+        MIT License
+
+        Copyright (c) 2026 X4B (Mathew Heard)
+        ```
+      MD
+      extracted = LicenseGate.extract(readme, :license_heading_section, "x4b")
+      assert extracted.start_with?("# License\n")
+      assert_includes extracted, "curated source files"
+      assert_includes extracted, "Copyright (c) 2026 X4B"
+      refute_includes extracted, "CC BY-SA"
+    end
+
     def test_extraction_failure_is_loud
       assert_raises(StageFailure) do
         LicenseGate.extract("# Totally Different README", :license_heading_section, "x4b")
